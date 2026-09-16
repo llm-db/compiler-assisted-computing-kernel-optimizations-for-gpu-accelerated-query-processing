@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -266,6 +267,14 @@ def engine_raise_on_fail() -> pl.GPUEngine:
 
 
 def pytest_configure(config: pytest.Config):
+    # Allow overriding the cudf-polars backend via CLI for easy testing.
+    # Usage: `pytest --backend=triton ...` or `pytest --backend=cudf ...`
+    backend = config.getoption("backend", None)
+    if backend is not None:
+        import os
+
+        os.environ["CUDF_POLARS__BACKEND"] = backend
+
     config.addinivalue_line(
         "markers",
         "skip_on_streaming_engine(reason, *, engine=None): skip the test for "
@@ -284,6 +293,17 @@ def pytest_configure(config: pytest.Config):
     config.addinivalue_line("filterwarnings", "ignore::ResourceWarning")
     # https://github.com/open-telemetry/opentelemetry-python/issues/5231 (used by Ray)
     config.addinivalue_line("filterwarnings", "ignore::DeprecationWarning")
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--backend",
+        action="store",
+        default=None,
+        choices=("cudf", "triton"),
+        help="Select execution backend for tests (cudf or triton).",
+    )
+
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc):

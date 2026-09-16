@@ -9,6 +9,7 @@ import polars as pl
 from cudf_polars.testing.asserts import assert_gpu_result_equal
 
 
+# @pytest.mark.parametrize("expr", [pl.col("c")])
 @pytest.mark.parametrize("expr", [pl.col("c"), pl.col("b") < 1, pl.lit(value=True)])
 @pytest.mark.parametrize("predicate_pushdown", [False, True])
 def test_filter(engine: pl.GPUEngine, expr, predicate_pushdown):

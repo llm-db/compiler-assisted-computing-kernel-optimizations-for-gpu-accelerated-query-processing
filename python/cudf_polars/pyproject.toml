@@ -239,3 +239,9 @@ docstring-code-format = true
 build-backend = "setuptools.build_meta"
 dependencies-file = "../../dependencies.yaml"
 matrix-entry = "cuda_suffixed=true"
+
+[tool.setuptools.packages.find]
+include = [
+    "cudf_polars*",
+]
+

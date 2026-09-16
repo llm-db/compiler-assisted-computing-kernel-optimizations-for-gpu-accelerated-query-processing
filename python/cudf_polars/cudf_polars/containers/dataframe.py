@@ -88,7 +88,6 @@ class NamedColumn(Column):
 
 class DataFrame:
     """A representation of a dataframe."""
-
     column_map: dict[str, Column]
     table: plc.Table
     columns: list[NamedColumn]

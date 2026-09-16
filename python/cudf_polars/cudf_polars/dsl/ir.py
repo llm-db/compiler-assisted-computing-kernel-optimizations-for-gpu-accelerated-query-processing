@@ -19,6 +19,7 @@ import contextvars
 import functools
 import itertools
 import json
+import pkgutil
 import random
 import time
 import uuid
@@ -63,6 +64,14 @@ from cudf_polars.utils.versions import (
     POLARS_VERSION_LT_137,
     POLARS_VERSION_LT_138,
 )
+from cudf_polars.triton.triton_conversion import ConversionManager, dataframe_cudf_to_triton, dataframe_triton_to_cudf, dataframes_cudf_to_triton, dtype_cudf_to_triton, expr_cudf_to_triton, named_expr_cudf_to_triton
+
+# List all Python modules/packages in that directory
+target_dir = Path("./cudf_polars").resolve()
+modules = [name for _, name, _ in pkgutil.iter_modules([str(target_dir)])]
+from cudf_polars.triton.ir_triton import conditional_join_triton, filter_triton, groupby_triton, join_triton, map_function_triton, merge_sorted_triton, projection_triton, reduce_triton, rolling_triton, select_triton, slice_triton, union_triton
+from cudf_polars.triton.backend import get_current_backend, is_triton_backend
+from cudf_polars.triton.components.dataframe_triton import TritonDataFrame
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Hashable, Iterable, Sequence
@@ -414,6 +423,7 @@ def _prepare_parquet_predicate(
     return predicate
 
 
+# Triton TODO
 class Scan(IR):
     """Input from files."""
 
@@ -942,6 +952,7 @@ class Scan(IR):
             return df.filter(mask)
 
 
+# Currently Skipped
 class Sink(IR):
     """Sink a dataframe to a file."""
 
@@ -1244,7 +1255,7 @@ class Sink(IR):
 
         return DataFrame([], stream=df.stream)
 
-
+# Currently Skipped
 class Cache(IR):
     """
     Return a cached plan node.
@@ -1319,7 +1330,7 @@ class Cache(IR):
                 cache[self.key] = (result, hits)
             return result  # pragma: no cover
 
-
+# Currently Skipped
 class DataFrameScan(IR):
     """
     Input from an existing polars DataFrame.
@@ -1445,7 +1456,7 @@ class DataFrameScan(IR):
         )
         return df
 
-
+# Half Implemented; TODO: Non-static function call
 class Select(IR):
     """Produce a new dataframe selecting given expressions from an input."""
 
@@ -1499,6 +1510,13 @@ class Select(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if(is_triton_backend()):
+            con = ConversionManager()
+            df2 = dataframe_cudf_to_triton(df)
+            exprs2 = [named_expr_cudf_to_triton(e, con, df.stream) for e in exprs]
+            df3 = select_triton(df2, exprs2, should_broadcast)
+            return dataframe_triton_to_cudf(df3, df.stream)
+
         # Handle any broadcasting
         columns = [e.evaluate(df) for e in exprs]
         if should_broadcast:
@@ -1535,6 +1553,7 @@ class Select(IR):
             If evaluation fails. Ideally this should not occur, since the
             translation phase should fail earlier.
         """
+
         if (
             isinstance(self.children[0], Scan)
             and Select._is_len_expr(self.exprs)
@@ -1558,7 +1577,7 @@ class Select(IR):
 
         return super().evaluate(cache=cache, timer=timer, context=context)
 
-
+# Implemented: But no tests to check for validity
 class Reduce(IR):
     """
     Produce a new dataframe selecting given expressions from an input.
@@ -1591,11 +1610,18 @@ class Reduce(IR):
         context: IRExecutionContext,
     ) -> DataFrame:  # pragma: no cover; not exposed by polars yet
         """Evaluate and return a dataframe."""
+        if is_triton_backend():
+            con = ConversionManager()
+            df2 = dataframe_cudf_to_triton(df)
+            exprs2 = tuple(named_expr_cudf_to_triton(e, con, df.stream) for e in exprs)
+            df3 = reduce_triton(df2, exprs2)
+            return dataframe_triton_to_cudf(df3, df.stream)
+
         columns = broadcast(*(e.evaluate(df) for e in exprs), stream=df.stream)
         assert all(column.size == 1 for column in columns)
         return DataFrame(columns, stream=df.stream)
 
-
+# Finished
 class Rolling(IR):
     """Perform a (possibly grouped) rolling aggregation."""
 
@@ -1705,6 +1731,24 @@ class Rolling(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if is_triton_backend():
+            con = ConversionManager()
+            df2 = dataframe_cudf_to_triton(df)
+            index2 = named_expr_cudf_to_triton(index, con, df.stream)
+            keys2 = tuple(named_expr_cudf_to_triton(key, con, df.stream) for key in keys_in)
+            aggs2 = tuple(named_expr_cudf_to_triton(agg, con, df.stream) for agg in aggs)
+            df3 = rolling_triton(
+                df2,
+                index2,
+                keys2,
+                aggs2,
+                preceding_ordinal,
+                following_ordinal,
+                closed_window,
+                zlice,
+            )
+            return dataframe_triton_to_cudf(df3, df.stream)
+
         keys = broadcast(
             *(k.evaluate(df) for k in keys_in),
             target_length=df.num_rows,
@@ -1784,7 +1828,7 @@ def _has_struct_in_list(polars_type: pl.DataType) -> bool:
         current = current.inner
     return isinstance(current, pl.Struct)
 
-
+# TODO?: group by returns a key,list pairs...
 class GroupBy(IR):
     """Perform a groupby."""
 
@@ -1862,6 +1906,24 @@ class GroupBy(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        # Streaming groupby requires mergeable libcudf aggregation state across
+        # partitions; TODO: Triton groupby currently evaluates complete groups only.
+        # if is_triton_backend():
+        #     keys2 = tuple(
+        #         named_expr_cudf_to_triton(key, df.stream) for key in keys_in
+        #     )
+        #     aggs2 = tuple(
+        #         named_expr_cudf_to_triton(agg, df.stream)
+        #         for agg in agg_requests
+        #     )
+        #     df2 = dataframe_cudf_to_triton(df)
+        #     df3 = groupby_triton(df2, keys2, aggs2, maintain_order, zlice)
+        #     print("df2", df2)
+        #     print(keys2)
+        #     print(aggs2)
+        #     print("df3", df3)
+        #     return dataframe_triton_to_cudf(df3, df.stream)
+
         keys = broadcast(
             *(k.evaluate(df) for k in keys_in),
             target_length=df.num_rows,
@@ -1978,6 +2040,10 @@ class GroupBy(IR):
                     ordered_table.columns(), broadcasted, strict=True
                 )
             ]
+
+        # df = DataFrame(broadcasted, stream=df.stream).slice(zlice)
+        # df2 = dataframe_cudf_to_triton(df)
+        # print(df2)
         return DataFrame(broadcasted, stream=df.stream).slice(zlice)
 
 
@@ -2186,6 +2252,16 @@ class ConditionalJoin(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if is_triton_backend():
+            con = ConversionManager()
+            left2 = dataframe_cudf_to_triton(left)
+            right2 = dataframe_cudf_to_triton(right)
+            pred = expr_cudf_to_triton(predicate_wrapper.predicate, con, stream=left2.stream)
+            result = conditional_join_triton(
+                left2, right2, pred, options
+            )
+            return dataframe_triton_to_cudf(result, left.stream)
+
         with context.stream_ordered_after(left, right) as stream:
             left_casts, right_casts = _collect_decimal_binop_casts(
                 predicate_wrapper.predicate
@@ -2479,6 +2555,19 @@ class Join(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if is_triton_backend():
+            con = ConversionManager()
+            left2 = dataframe_cudf_to_triton(left)
+            right2 = dataframe_cudf_to_triton(right)
+            left_on2 = tuple(
+                named_expr_cudf_to_triton(e, con, left.stream) for e in left_on_exprs
+            )
+            right_on2 = tuple(
+                named_expr_cudf_to_triton(e, con, right.stream) for e in right_on_exprs
+            )
+            result = join_triton(left2, right2, left_on2, right_on2, options)
+            return dataframe_triton_to_cudf(result, left.stream)
+
         with context.stream_ordered_after(left, right) as stream:
             how, nulls_equal, zlice, suffix, coalesce, maintain_order = options
             if how == "Cross":
@@ -2874,6 +2963,7 @@ class Sort(IR):
         return result.slice(zlice)
 
 
+# Finished
 class Slice(IR):
     """Slice a dataframe."""
 
@@ -2899,9 +2989,15 @@ class Slice(IR):
         cls, offset: int, length: int, df: DataFrame, *, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if(is_triton_backend()):
+            df2 = dataframe_cudf_to_triton(df)
+            df3 = slice_triton(df2, offset, length)
+            return dataframe_triton_to_cudf(df3, df.stream)
+
         return df.slice((offset, length))
 
 
+# Finished
 class Filter(IR):
     """Filter a dataframe with a boolean mask."""
 
@@ -2924,6 +3020,14 @@ class Filter(IR):
         cls, mask_expr: expr.NamedExpr, df: DataFrame, *, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if(is_triton_backend()):
+            con = ConversionManager()
+            df2 = dataframe_cudf_to_triton(df)
+            mask_expr2 = named_expr_cudf_to_triton(mask_expr, con, df.stream)
+            df3 = filter_triton(df2, mask_expr2)
+            return dataframe_triton_to_cudf(df3, df.stream)
+
+        # raise NotImplementedError("NOT", get_current_backend())
         (mask,) = broadcast(
             mask_expr.evaluate(df), target_length=df.num_rows, stream=df.stream
         )
@@ -2949,6 +3053,11 @@ class Projection(IR):
         cls, schema: Schema, df: DataFrame, *, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if(is_triton_backend()):
+            df2 = dataframe_cudf_to_triton(df)
+            df3 = projection_triton(df2, schema)
+            return dataframe_triton_to_cudf(df3, df.stream)
+
         # This can reorder things.
         columns = broadcast(
             *(df.column_map[name] for name in schema),
@@ -2987,6 +3096,11 @@ class MergeSorted(IR):
     def do_evaluate(
         cls, key: str, *dfs: DataFrame, context: IRExecutionContext
     ) -> DataFrame:
+        # if(is_triton_backend()):
+        #     dfs2 = dataframes_cudf_to_triton(*dfs)
+        #     df3 = merge_sorted_triton(*dfs2, key)
+        #     return dataframe_triton_to_cudf(df3, dfs[0].stream) # Is dfs[0] alright?
+
         """Evaluate and return a dataframe."""
         with context.stream_ordered_after(*dfs) as stream:
             left, right = dfs
@@ -3127,6 +3241,11 @@ class MapFunction(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if(is_triton_backend()):
+            df2 = dataframe_cudf_to_triton(df)
+            df3 = map_function_triton(df2, schema, name, options)
+            return dataframe_triton_to_cudf(df3, df.stream)
+
         if name == "rechunk":
             # No-op in our data model
             # Don't think this appears in a plan tree from python
@@ -3233,6 +3352,11 @@ class Union(IR):
         cls, zlice: Zlice | None, *dfs: DataFrame, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        # if(is_triton_backend()):
+        #     df2 = dataframe_cudf_to_triton(dfs)
+        #     df3 = union_triton(df2, zlice)
+        #     return dataframe_triton_to_cudf(df3, df.stream)
+
         with context.stream_ordered_after(*dfs) as stream:
             # TODO: only evaluate what we need if we have a slice?
             return DataFrame.from_table(

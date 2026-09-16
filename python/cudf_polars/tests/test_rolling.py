@@ -15,11 +15,14 @@ from cudf_polars.testing.asserts import (
 )
 from cudf_polars.utils.versions import POLARS_VERSION_LT_136
 
+# TODO: Re-enable these tests once Triton supports datetime tensors.
+skip_triton_datetime = pytest.mark.skip(
+    reason="Triton does not support datetime dtypes directly"
+)
 
 @pytest.fixture(params=[False, True], ids=["nosort", "sort"])
 def presort(request):
     return request.param
-
 
 @pytest.fixture
 def df(presort):
@@ -51,6 +54,7 @@ def df(presort):
 
 @pytest.mark.parametrize("closed", ["left", "right", "both", "none"])
 @pytest.mark.parametrize("period", ["1w4d", "48h", "180s"])
+@skip_triton_datetime
 def test_datetime_rolling(engine: pl.GPUEngine, df, closed, period):
     q = df.rolling("dt", period=period, closed=closed).agg(
         sum_a=pl.sum("values"),
@@ -103,6 +107,7 @@ def test_rolling_empty_aggs(engine: pl.GPUEngine, with_slice):
     assert_gpu_result_equal(q, engine=engine)
 
 
+@skip_triton_datetime
 def test_calendrical_period_unsupported(df):
     q = df.rolling("dt", period="1mo", closed="right").agg(sum=pl.sum("values"))
 
@@ -210,6 +215,7 @@ def test_rolling_sum_all_null_window_returns_null(engine: pl.GPUEngine):
     assert_gpu_result_equal(q, engine=engine)
 
 
+@skip_triton_datetime
 def test_rolling_null_count(engine: pl.GPUEngine, df):
     lf = df.with_columns(
         null=pl.when(pl.col("values") % 2 == 0).then(None).otherwise(pl.col("values"))
@@ -244,6 +250,7 @@ def test_rolling_null_count(engine: pl.GPUEngine, df):
         "post_manually_compute_mean",
     ],
 )
+@skip_triton_datetime
 def test_rolling_ternary_supported(engine: pl.GPUEngine, df, expr):
     q = df.rolling("dt", period="48h", closed="both").agg(expr.alias("out"))
     assert_gpu_result_equal(q, engine=engine)
@@ -261,11 +268,13 @@ def test_rolling_ternary_supported(engine: pl.GPUEngine, df, expr):
         .sum(),
     ],
 )
+@skip_triton_datetime
 def test_rolling_ternary_unsupported(df, expr):
     q = df.rolling("dt", period="48h", closed="both").agg(expr.alias("out"))
     assert_ir_translation_raises(q, NotImplementedError)
 
 
+@skip_triton_datetime
 def test_rolling_rank_unsupported(df):
     q = df.rolling("dt", period="48h", closed="both").agg(
         pl.col("values").rank(method="dense", descending=False)

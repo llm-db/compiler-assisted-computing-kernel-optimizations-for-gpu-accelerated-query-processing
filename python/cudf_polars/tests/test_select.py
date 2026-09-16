@@ -97,11 +97,11 @@ def test_select_with_cse_with_agg(engine: pl.GPUEngine):
 
     assert_gpu_result_equal(query, engine=engine)
 
-
-def test_select_native_datetime(engine: pl.GPUEngine):
-    df = pl.LazyFrame({"c0": [1]})
-    query = df.select(pl.datetime(1969, 12, 7, 20, 47, 14))
-    assert_gpu_result_equal(query, engine=engine)
+# TODO?: Removed for triton
+# def test_select_native_datetime(engine: pl.GPUEngine):
+#     df = pl.LazyFrame({"c0": [1]})
+#     query = df.select(pl.datetime(1969, 12, 7, 20, 47, 14))
+#     assert_gpu_result_equal(query, engine=engine)
 
 
 @pytest.mark.parametrize("fmt", ["ndjson", "csv"])

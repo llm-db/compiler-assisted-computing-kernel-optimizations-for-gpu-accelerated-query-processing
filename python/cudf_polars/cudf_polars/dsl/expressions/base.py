@@ -45,6 +45,7 @@ class Expr(Node["Expr"]):
     _non_child: ClassVar[tuple[str, ...]] = ("dtype",)
     """Names of non-child data (not Exprs) for reconstruction."""
 
+
     def do_evaluate(
         self, df: DataFrame, *, context: ExecutionContext = ExecutionContext.FRAME
     ) -> Column:

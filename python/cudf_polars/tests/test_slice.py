@@ -9,6 +9,15 @@ import polars as pl
 from cudf_polars.testing.asserts import assert_gpu_result_equal
 
 
+# @pytest.mark.parametrize(
+#     "offset",
+#     [1],
+# )
+# @pytest.mark.parametrize(
+#     "length",
+#     [1],
+# )
+# @pytest.mark.parametrize("slice_pushdown", [True])
 @pytest.mark.parametrize(
     "offset",
     [0, 1, 2, -10, -20, -1, -2, 20],
