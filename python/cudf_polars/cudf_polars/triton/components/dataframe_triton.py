@@ -7,7 +7,7 @@ from cudf_polars.triton.components.column_triton import TritonColumn, NamedColum
 import pylibcudf as plc
 import numpy as np
 import torch
-
+from rmm.pylibrmm.stream import Stream
 from cudf_polars.utils import conversion
 from cudf_polars.typing import Slice
 from cudf_polars.triton.components.boolOp_triton import boolean_operation
@@ -20,22 +20,28 @@ class TritonDataFrame:
     columns: list[NamedColumnTriton]
     _num_rows_override: int | None
     stream: torch.Stream
+    cudf_stream: Stream
 
     def __init__(
-        self, columns: Iterable[TritonColumn], stream: torch.Stream, num_rows: int | None = None
+        self, columns: Iterable[TritonColumn], cudf_stream: Stream, num_rows: int | None = None
     ) -> None:
+        if not isinstance(cudf_stream, Stream):
+            raise ValueError("Should be cudf stream")
         columns = list(columns)
-        self.stream = stream
+
+        self.cudf_stream = cudf_stream
+        version, stream_ptr = cudf_stream.__cuda_stream__()
+        assert version == 0
+
+        self.stream = torch.cuda.ExternalStream(
+            stream_ptr,
+            device=torch.cuda.current_device(),
+        )
         if any(c.name is None for c in columns):
             raise ValueError("All columns must have a name")
         self.columns = [cast(NamedColumnTriton, c) for c in columns]
         self.dtypes = [c.dtype for c in self.columns]
         self.column_map = {c.name: c for c in self.columns}
-        # print("!!!!!!!!!!!!!!!!!")
-        # for c in self.columns:
-        #     print(c.obj)
-
-        # self.table = np.asarray([c.obj for c in self.columns], dtype=object)
         self._num_rows_override = num_rows
 
     # @classmethod
@@ -91,26 +97,29 @@ class TritonDataFrame:
         #     raise NotImplementedError("Did not expect validity values for masks")
         assert mask.obj.dtype == torch.bool
 
-        mask_tensor = mask.obj
-        mask_tensor = boolean_operation(mask_tensor, mask.validity, "and", stream=self.stream)
-        mask_indices = torch.nonzero(mask_tensor).flatten()
-
-        new_columns = []
-        for c in self.columns:
-            column_obj_tensr = masked_gather(c.obj, mask_indices, self.stream)
-            column_validity_tensor = None
-            column_validity_tensor = masked_gather(c.validity, mask_indices, self.stream)
-
-            new_columns.append(
-                TritonColumn(
-                    column=column_obj_tensr,
-                    validity=column_validity_tensor,
-                    dtype=c.dtype,
-                    name=c.name,
-                )
+        with torch.cuda.stream(self.stream):
+            mask_tensor = boolean_operation(
+                mask.obj, mask.validity, "and", stream=self.stream
             )
+            mask_indices = torch.nonzero(mask_tensor).flatten()
 
-        return type(self)(new_columns, self.stream)
+            new_columns = []
+            for c in self.columns:
+                column_obj_tensor = masked_gather(c.obj, mask_indices, self.stream)
+                column_validity_tensor = masked_gather(
+                    c.validity, mask_indices, self.stream
+                )
+
+                new_columns.append(
+                    TritonColumn(
+                        column=column_obj_tensor,
+                        validity=column_validity_tensor,
+                        dtype=c.dtype,
+                        name=c.name,
+                    )
+                )
+
+        return type(self)(new_columns, self.cudf_stream)
         # table = apply_boolean_mask_triton(
         #     [c.obj for c in self.columns],
         #     mask.obj,
@@ -175,11 +184,8 @@ class TritonDataFrame:
             )
             for col in self.columns
         ]
-        print("HIIII")
-        for c in sliced_columns:
-            print(c.obj)
 
-        return type(self)(sliced_columns, self.stream)
+        return type(self)(sliced_columns, self.cudf_stream)
 
     @cached_property
     def column_names_set(self) -> frozenset[str]:
@@ -196,11 +202,49 @@ class TritonDataFrame:
         """Number of columns."""
         return len(self.column_map)
 
+    def with_columns(
+            self,
+            columns: Iterable[TritonColumn],
+            *,
+            replace_only: bool = False,
+            stream: torch.Stream,
+        ) -> Self:
+            """
+            Return a new dataframe with extra columns.
+    
+            Parameters
+            ----------
+            columns
+                Columns to add
+            replace_only
+                If true, then only replacements are allowed (matching by name).
+            stream
+                CUDA stream used for device memory operations and kernel launches.
+                The caller is responsible for ensuring that
+    
+                1. The data in ``columns`` is valid on ``stream``.
+                2. No additional operations occur on ``self.stream`` with the
+                   original data in ``self``.
+    
+            Returns
+            -------
+            New dataframe
+    
+            Notes
+            -----
+            If column names overlap, newer names replace older ones, and
+            appear in the same order as the original frame.
+            """
+            new = {c.name: c for c in columns}
+            if replace_only and not self.column_names_set.issuperset(new.keys()):
+                raise ValueError("Cannot replace with non-existing names")
+            return type(self)((self.column_map | new).values(), self.cudf_stream)
+
     def discard_columns(self, names: Set[str]) -> Self:
         """Drop columns by name."""
         return type(self)(
             (column for column in self.columns if column.name not in names),
-            stream=self.stream,
+            self.cudf_stream,
         )
     
     def select_columns(self, names: Set[str]) -> list[TritonColumn]:

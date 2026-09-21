@@ -5,6 +5,10 @@ import triton.language as tl
 from cudf_polars.triton.components.dataframe_triton import TritonDataFrame
 from cudf_polars.triton.components.column_triton import TritonColumn
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from python.cudf_polars.cudf_polars.dsl.ir import IRExecutionContext
+
 
 
 def merge_dataframes(
@@ -281,7 +285,7 @@ def merge_two_dataframes(
     left: TritonDataFrame,
     right: TritonDataFrame,
     key: str,
-    stream: torch.cuda.Stream,
+    context: IRExecutionContext,
 ) -> TritonDataFrame:
 
     left_key = left.column_map[key]
@@ -305,7 +309,7 @@ def merge_two_dataframes(
 
     grid = (triton.cdiv(n_out, 256),)
 
-    with torch.cuda.stream(stream):
+    with context.stream_ordered_after(left.cudf_stream, right.cudf_stream) as stream:
         _merge_indices_kernel[grid](
             left_key.obj,
             left_key.validity,
@@ -353,11 +357,11 @@ def merge_two_dataframes(
                 )
             )
 
-    return TritonDataFrame(
-        output_columns,
-        stream=stream,
-        num_rows=n_out,
-    )
+        return TritonDataFrame(
+            output_columns,
+            stream=stream,
+            num_rows=n_out,
+        )
     
     
     

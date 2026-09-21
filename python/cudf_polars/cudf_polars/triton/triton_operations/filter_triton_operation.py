@@ -65,13 +65,12 @@ def masked_gather(
 
     grid = (triton.cdiv(n_selected, BLOCK_SIZE),)
 
-    ret = torch.empty(
-        (n_selected,),
-        dtype=x.dtype,
-        device=x.device,
-    )
-
     with torch.cuda.stream(stream):
+        ret = torch.empty(
+            (n_selected,),
+            dtype=x.dtype,
+            device=x.device,
+        )
         gather_masked_kernel[grid](
             x,
             indices,

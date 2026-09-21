@@ -1,6 +1,7 @@
 
 
 from ast import BinOp
+import itertools
 from typing import Any
 
 import torch
@@ -12,6 +13,7 @@ from cudf_polars.triton.components.base_triton import TritonExpr, TritonNamedExp
 from cudf_polars.typing import Schema, Slice as Zlice
 from cudf_polars.triton.components.join_triton import join_coalesce, join_gather, join_gather_column, join_pairs
 from cudf_polars.triton.components.binOp_triton import TritonBinOp
+import pylibcudf as plc
 
 
 def join_triton(
@@ -20,32 +22,168 @@ def join_triton(
     left_on: tuple[TritonNamedExpr, ...],
     right_on: tuple[TritonNamedExpr, ...],
     options: tuple[str, bool, Zlice | None, str, bool, str],
+    context
 ) -> TritonDataFrame:
     """Evaluate a regular join using Triton tensors."""
-    how, nulls_equal, zlice, suffix, coalesce, maintain_order = options
-    left_keys = list(broadcast_triton(*(key.evaluate(left) for key in left_on), target_length=left.num_rows))
-    right_keys = list(broadcast_triton(*(key.evaluate(right) for key in right_on), target_length=right.num_rows))
-    left_indices, right_indices = join_pairs(
-        left_keys,
-        right_keys,
-        how,
-        nulls_equal,
-        device=left.stream.device,
-        n_left=left.num_rows,
-        n_right=right.num_rows,
+
+    with context.stream_ordered_after(left, right) as stream:
+        how, nulls_equal, zlice, suffix, coalesce, maintain_order = options
+        left_keys = list(broadcast_triton(*(key.evaluate(left) for key in left_on), target_length=left.num_rows))
+        right_keys = list(broadcast_triton(*(key.evaluate(right) for key in right_on), target_length=right.num_rows))
+        left_indices, right_indices = join_pairs(
+            left_keys,
+            right_keys,
+            how,
+            nulls_equal,
+            device=left.stream.device,
+            n_left=left.num_rows,
+            n_right=right.num_rows,
+        )
+
+        if how in {"Semi", "Anti"}:
+            columns = [
+                join_gather_column(column, left_indices).rename(column.name)
+                for column in left.columns
+            ]
+            return TritonDataFrame(columns, stream).slice(zlice)
+
+        left_columns, right_columns = join_gather(left, right, options, left_indices, right_indices)
+        if coalesce:
+            left_columns, right_columns = join_coalesce(left, right, right_on, left_on, options, left_columns, right_columns)
+        ret_df = TritonDataFrame([*left_columns, *right_columns], stream).slice(zlice)
+        return ret_df
+
+
+def empty_triton(
+    schema, *, context
+) -> TritonDataFrame:
+    stream = context.get_cuda_stream()
+    return TritonDataFrame(
+        [
+            TritonColumn(
+                [],
+                dtype=dtype,
+                name=name,
+            )
+            for name, dtype in schema.items()
+        ],
+        cudf_stream=stream,
     )
+    
+    
 
-    if how in {"Semi", "Anti"}:
-        columns = [
-            join_gather_column(column, left_indices).rename(column.name)
-            for column in left.columns
-        ]
-        return TritonDataFrame(columns, left.stream).slice(zlice)
+def hconcat_triton(
+    *dfs: TritonDataFrame,
+    schema,
+    should_broadcast: bool,
+    strict: bool,
+    context
+) -> TritonDataFrame:
 
-    left_columns, right_columns = join_gather(left, right, options, left_indices, right_indices)
-    if coalesce:
-        left_columns, right_columns = join_coalesce(left, right, right_on, left_on, options, left_columns, right_columns)
-    return TritonDataFrame([*left_columns, *right_columns], left.stream).slice(zlice)
+    with context.stream_ordered_after(*dfs) as stream:
+        # Special should_broadcast case.
+        # Used to recombine decomposed expressions
+        if should_broadcast:
+            bcols = broadcast_triton(
+                *itertools.chain.from_iterable(df.columns for df in dfs),
+            )
+            by_name = {c.name: c for c in bcols}
+            ordered = [by_name[name] for name in schema]
+            result = TritonDataFrame(ordered, cudf_stream=stream)
+        else:
+            max_rows = max(df.num_rows for df in dfs)
+            if strict and any(df.num_rows != max_rows for df in dfs):
+                heights = [df.num_rows for df in dfs]
+                msg = (
+                    f"cannot concat DataFrames horizontally"
+                    f" with strict=True: height mismatch {heights}"
+                )
+                raise ValueError(msg)
+            # Horizontal concatenation extends shorter tables with nulls
+            result = TritonDataFrame(
+                itertools.chain.from_iterable(
+                    df.columns
+                    for df in (
+                        df
+                        if df.num_rows == max_rows
+                        else TritonDataFrame.from_table(
+                            cls._extend_with_nulls(
+                                df.table,
+                                nrows=max_rows - df.num_rows,
+                                stream=stream,
+                            ),
+                            df.column_names,
+                            df.dtypes,
+                            stream=stream,
+                        )
+                        for df in dfs
+                    )
+                ),
+                stream=stream,
+            )
+
+        return result
+        
+def hstack_triton(
+    df: TritonDataFrame,
+    exprs: tuple[TritonNamedExpr, ...],
+    should_broadcast: bool,
+) -> TritonDataFrame:
+    """Evaluate and return a dataframe."""
+    columns = [c.evaluate(df) for c in exprs]
+    if should_broadcast:
+        columns = broadcast_triton(
+            *columns,
+            target_length=df.num_rows if df.num_columns != 0 else None,
+        )
+    else:  # pragma: no cover; streaming rewrites HStack(False)
+        # Polars ensures this is true, but let's make sure nothing
+        # went wrong. In this case, the parent node is
+        # guaranteed to be a Select which will take care of making
+        # sure that everything is the same length. The result
+        # table that might have mismatching column lengths will
+        # never be turned into a pylibcudf Table with all columns
+        # by the Select, which is why this is safe.
+        assert all(e.name.startswith("__POLARS_CSER_0x") for e in exprs)
+    return df.with_columns(columns, stream=df.stream)
+
+
+def distinct_triton(
+    df: TritonDataFrame,
+    keep: plc.stream_compaction.DuplicateKeepOption,
+    subset: frozenset[str] | None,
+    zlice: Zlice | None,
+) -> TritonDataFrame:
+    """Evaluate and return a dataframe."""
+
+    # if subset is None:
+    #     indices = list(range(df.num_columns))
+    #     keys_sorted = all(c.is_sorted for c in df.column_map.values())
+    # else:
+    #     indices = [i for i, k in enumerate(df.column_names) if k in subset]
+    #     keys_sorted = all(df.column_map[name].is_sorted for name in subset)
+    # if keys_sorted:
+    #     pass
+    # else:
+    #     # table = #TODO Fn
+    #     # (
+    #     #     df.table,
+    #     #     indices,
+    #     #     keep,
+    #     #     df.stream,
+    #     # )
+    # # TODO: Is this sortedness setting correct
+    # result = TritonDataFrame(
+    #     [
+    #         TritonColumn(new, name=old.name, dtype=old.dtype).sorted_like(old)
+    #         for new, old in zip(table.columns(), df.columns, strict=True)
+    #     ],
+    #     stream=df.cudf_stream,
+    # )
+    # if keys_sorted:
+    #     result = result.sorted_like(df)
+    # return result.slice(zlice)
+    
 
 
 def conditional_join_triton(
@@ -56,10 +194,12 @@ def conditional_join_triton(
 ) -> TritonDataFrame:
     """Evaluate a conditional inner join using a pairwise Torch mask."""
     _, nulls_equal, zlice, suffix, coalesce, maintain_order = options
-    print(left, right)
     if not isinstance(predicate, TritonBinOp):
         raise TypeError("BinOp expected")
-    print(predicate.op)
+    matches_col = predicate.do_evaluate_dual(
+        left, 
+        right
+    )
 
     # n_left = left.num_rows
     # n_right = right.num_rows
@@ -72,22 +212,15 @@ def conditional_join_triton(
         #     dtype=col.dtype, 
         #     validity=torch.tensor([col.validity[r]], device=col.obj.device)
         # )
-    matches_obj, matches_validity = predicate.do_evaluate_dual(
-        left, 
-        right
-    )
 
-    print(matches_obj)
-    left_indices, right_indices = torch.nonzero(matches_obj, as_tuple=True)
+    left_indices, right_indices = torch.nonzero(matches_col.obj, as_tuple=True)
 
     left_columns, right_columns = join_gather(left, right, options, left_indices, right_indices)
     # if coalesce:
     #     left_columns, right_columns = join_coalesce(left, right, right_on, left_on, options, left_columns, right_columns)
     df = TritonDataFrame([*left_columns, *right_columns], left.stream).slice(zlice)
-    print(df)
     return df
 
-    # print(options)
     # predCol = predicate.do_evaluate_dual(left, right)
     # # values, validity = join_conditional_operand(predicate, left, right)
     # left_indices, right_indices = torch.nonzero(predCol.obj & predCol.validity, as_tuple=True)
@@ -123,12 +256,12 @@ def select_triton(df: TritonDataFrame, exprs: tuple[TritonNamedExpr, ...], shoul
     columns = [e.evaluate(df) for e in exprs]
     if should_broadcast:
         columns = broadcast_triton(*columns)
-    return TritonDataFrame(columns, df.stream)
+    return TritonDataFrame(columns, df.cudf_stream)
 
 def reduce_triton(df: TritonDataFrame, exprs: tuple[TritonNamedExpr, ...]) -> TritonDataFrame:
     columns = broadcast_triton(*(expr.evaluate(df) for expr in exprs))
     columns = [column.rename(expr.name) for column, expr in zip(columns, exprs, strict=True)]
-    return TritonDataFrame(columns, df.stream)
+    return TritonDataFrame(columns, df.cudf_stream)
 
 def rolling_triton(
     df: TritonDataFrame,
@@ -226,7 +359,7 @@ def rolling_triton(
             )
             for column in df.columns
         ]
-        window_df = TritonDataFrame(window_columns, df.stream)
+        window_df = TritonDataFrame(window_columns, df.cudf_stream)
         for agg in aggs:
             result = agg.evaluate(window_df)
             values[agg.name].append(result.obj[0])
@@ -244,7 +377,7 @@ def rolling_triton(
             )
         )
 
-    return TritonDataFrame(result_columns, df.stream).slice(zlice)
+    return TritonDataFrame(result_columns, df.cudf_stream).slice(zlice)
 
 def groupby_triton(
     df: TritonDataFrame,
@@ -319,7 +452,7 @@ def groupby_triton(
                     )
                     for column in df.columns
                 ],
-                df.stream,
+                df.cudf_stream,
             )
             result = agg.evaluate(subgroup)
             result_values.append(result.obj[0])
@@ -343,7 +476,7 @@ def groupby_triton(
             )
         )
 
-    return TritonDataFrame(result_columns, df.stream).slice(zlice)
+    return TritonDataFrame(result_columns, df.cudf_stream).slice(zlice)
 
 def slice_triton(df: TritonDataFrame, offset: int, length: int) -> TritonDataFrame:
     return df.slice((offset, length))
@@ -354,7 +487,7 @@ def projection_triton(df: TritonDataFrame, schema: Schema) -> TritonDataFrame:
         *(df.column_map[name] for name in schema),
         target_length=df.num_rows
     )
-    return TritonDataFrame(columns, df.stream)
+    return TritonDataFrame(columns, df.cudf_stream)
 
 def map_function_triton(df: TritonDataFrame, schema: Schema, name: str, options: Any) -> TritonDataFrame:
     if name == "rechunk":

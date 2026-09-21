@@ -108,6 +108,19 @@ def stream_ordered_after(
 #     # TODO: Handle other binary operations as needed
 # }
 
+# def _add_cast(
+#     target: DataType,
+#     side: TritonColRef,
+#     left_casts: dict[str, DataType],
+#     right_casts: dict[str, DataType],
+# ) -> None:  # pragma: no cover
+#     (col,) = side.children
+#     assert isinstance(col, TritonColumn)
+#     casts = (
+#         left_casts if side.table_ref == plc.expressions.TableReference.LEFT else right_casts
+#     )
+#     casts[col.name] = target
+
 # def _align_decimal_binop_types(
 #     left_expr: TritonColRef,
 #     right_expr: TritonColRef,

@@ -3,6 +3,7 @@
 from typing import Callable
 
 import torch
+import pylibcudf as plc
 
 from cudf_polars.triton.components.column_triton import TritonColumn
 from cudf_polars.typing import Slice as Zlice
@@ -98,6 +99,19 @@ def join_gather_column(
 #         values, valid = _conditional_operand(child, left, right)
 #         return values.to(dtype_cudf_to_triton(node.dtype)), valid
 #     raise NotImplementedError(f"Conditional Triton expression {type(node).__name__}")
+
+# def replace_column_ref(expr: TritonExpr, left: TritonDataFrame, right: TritonDataFrame):
+#     def walk(node: TritonExpr):
+#         if isinstance(node, TritonColRef):
+#             if node.table_ref == plc.expressions.TableReference.LEFT:
+#                 node.df_override = left
+#             elif node.table_ref == plc.expressions.TableReference.RIGHT:
+#                 node.df_override = right
+#             else:
+#                 raise NotImplementedError(node.table_ref, " not implemented")
+#         for c in node.children:
+#             walk(c)
+#     walk(expr)
 
 def equal_match(left_key: TritonColumn, right_key: TritonColumn, nulls_equal: bool,) -> torch.Tensor: 
     equal = left_key.obj[:, None] == right_key.obj[None, :] 

@@ -1,7 +1,7 @@
 import torch
 import triton
 
-from cudf_polars.triton.components.base_triton import ExecutionContext, TritonExpr
+from cudf_polars.triton.components.base_triton import ExecutionContext, TritonColRef, TritonExpr
 from cudf_polars.triton.components.column_triton import TritonColumn
 from cudf_polars.triton.components.dataframe_triton import TritonDataFrame
 
@@ -80,30 +80,68 @@ class TritonBinOp(TritonExpr):
     # def do_evaluate_dual(
     #     self, left_df: TritonDataFrame, right_df: TritonDataFrame, *, context: ExecutionContext = ExecutionContext.FRAME    
     # ) -> TritonColumn:
+    _JOIN_DUAL_OP = {
+        plc.binaryop.BinaryOperator.EQUAL,
+        plc.binaryop.BinaryOperator.NOT_EQUAL,
+        plc.binaryop.BinaryOperator.LESS,
+        plc.binaryop.BinaryOperator.LESS_EQUAL,
+        plc.binaryop.BinaryOperator.GREATER,
+        plc.binaryop.BinaryOperator.GREATER_EQUAL,
+        # TODO: Handle other binary operations as needed
+    }
+
     def do_evaluate_dual(
             self, left_df: TritonDataFrame, right_df: TritonColumn, *, context: ExecutionContext = ExecutionContext.FRAME    
     ) -> TritonColumn:
-        # left = self.children[0].evaluate(left_df, context=context)
-        # right = self.children[1].evaluate(right_df, context=context)
         # TODO? Combine streams?
-        left = self.children[0].evaluate(left_df)
-        right = self.children[1].evaluate(right_df)
+        def find_col_ref(exp: TritonExpr):
+            res = None
+            for c in exp.children:
+                t = find_col_ref(c)
+                if t != None:
+                    if res != None and res.table_ref != t.table_ref:
+                        raise ValueError("Expected only one triton data frame!")
+                    res = t
 
-        n_left = left_df.num_rows
-        n_right = right_df.num_rows
-        matches_obj = torch.ones((n_left, n_right), device=left.obj.device, dtype=self.dtype)
-        matches_validity = torch.ones((n_left, n_right), device=left.obj.device, dtype=self.dtype)
-        for r in range(n_left): # TODO: Obj scalar may be null
-            new_col = TritonColumn(
-                torch.tensor([left.obj[r]], device=left.obj.device), 
-                dtype=left.dtype, 
-                validity=torch.tensor([left.validity[r]], device=left.obj.device)
-            )
-            t = self._apply_operation(left_df, new_col, right, context=context)
-            matches_obj[r,:] = t.obj & t.validity
-            matches_validity[r,:] = t.validity
-        return matches_obj, matches_validity
+            if isinstance(exp, TritonColRef):
+                if res != None and res.table_ref != exp.table_ref:
+                    raise ValueError("Expected only one triton data frame!")
+                return exp
+            return res
+        
+        def child_call(exp):
+            if isinstance(exp, TritonBinOp):
+                return exp.do_evaluate_dual(left_df, right_df, context=context)
+            tbl = find_col_ref(exp)
 
+            if tbl == None or tbl.table_ref == plc.expressions.TableReference.LEFT:
+                return exp.do_evaluate(left_df, context=context)
+            else:
+                return exp.do_evaluate(right_df, context=context)
+            
+            
+        left, right = (child_call(child) for child in self.children)
+        if self.op in self._JOIN_DUAL_OP:
+            n_left = left_df.num_rows
+            n_right = right_df.num_rows
+            matches_obj = torch.ones((n_left, n_right), device=left.obj.device, dtype=self.dtype)
+            matches_validity = torch.ones((n_left, n_right), device=left.obj.device, dtype=self.dtype)
+            for r in range(n_left): # TODO: Obj scalar may be null
+                new_col = TritonColumn(
+                    torch.tensor([left.obj[r]], device=left.obj.device), 
+                    dtype=left.dtype, 
+                    validity=torch.tensor([left.validity[r]], device=left.obj.device)
+                )
+                t = self._apply_operation(left_df, new_col, right, context=context)
+                matches_obj[r,:] = t.obj & t.validity
+                matches_validity[r,:] = t.validity
+        
+            return TritonColumn(matches_obj, self.dtype, validity=matches_validity)
+        
+        return self._apply_operation(left_df, left, right, context=context)
+
+    def __repr__(self):
+        return f"<TritonBinOp(op={self.op}, outty={self.dtype})>"
 
     def do_evaluate(
         self, df: TritonDataFrame, *, context: ExecutionContext = ExecutionContext.FRAME
@@ -176,8 +214,6 @@ class TritonBinOp(TritonExpr):
         elif self.op == plc.binaryop.BinaryOperator.GREATER:
             ret_obj = compare(lop, rop, "greater", self.dtype, df.stream)
         elif self.op == plc.binaryop.BinaryOperator.GREATER_EQUAL:
-            # print("OO1111O", self.children)
-            # print("OOOOOOOOOOOOO", lop, rop)
             ret_obj = compare(lop, rop, "geq", self.dtype, df.stream)
         elif self.op == plc.binaryop.BinaryOperator.LESS_EQUAL:
             ret_obj = compare(lop, rop, "leq", self.dtype, df.stream)
@@ -207,7 +243,6 @@ class TritonBinOp(TritonExpr):
         elif self.op == plc.binaryop.BinaryOperator.SUB:
             ret_obj = compare(lop, rop, "sub", self.dtype, df.stream)
         elif self.op == plc.binaryop.BinaryOperator.MUL:
-            print("MUL", lop, rop, ret_obj)
             ret_obj = compare(lop, rop, "mul", self.dtype, df.stream)
         elif self.op == plc.binaryop.BinaryOperator.DIV:
             ret_obj = compare(lop, rop, "div", self.dtype, df.stream)

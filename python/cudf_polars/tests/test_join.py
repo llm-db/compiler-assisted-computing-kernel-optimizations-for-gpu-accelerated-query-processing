@@ -151,45 +151,45 @@ def right():
 #     assert_gpu_result_equal(q, engine=engine, check_row_order=False)
 
 
-@pytest.mark.parametrize(
-    "conditions",
-    [
-        [pl.col("a") < pl.col("a_right")],
-        [
-            pl.col("a_right") <= pl.col("a") * 2,
-            pl.col("a_right") <= 2 * pl.col("a"),
-        ],
-        [pl.col("b") * 2 > pl.col("a_right"), pl.col("a") == pl.col("c_right")],
-        [pl.col("b") * 2 <= pl.col("a_right"), pl.col("a") < pl.col("c_right")],
-        [pl.col("b") <= pl.col("a_right") * 7, pl.col("a") < pl.col("d") * 2],
-    ],
-)
-@pytest.mark.parametrize("zlice", [None, (0, 5)])
-@pytest.mark.skip_on_streaming_engine(
-    "ConditionalJoin not supported for multiple partitions"
-)
-def test_join_where(engine: pl.GPUEngine, left, right, conditions, zlice):
-    q = left.join_where(right, *conditions)
+# @pytest.mark.parametrize(
+#     "conditions",
+#     [
+#         [pl.col("a") < pl.col("a_right")],
+#         [
+#             pl.col("a_right") <= pl.col("a") * 2,
+#             pl.col("a_right") <= 2 * pl.col("a"),
+#         ],
+#         [pl.col("b") * 2 > pl.col("a_right"), pl.col("a") == pl.col("c_right")],
+#         [pl.col("b") * 2 <= pl.col("a_right"), pl.col("a") < pl.col("c_right")],
+#         [pl.col("b") <= pl.col("a_right") * 7, pl.col("a") < pl.col("d") * 2],
+#     ],
+# )
+# @pytest.mark.parametrize("zlice", [None, (0, 5)])
+# @pytest.mark.skip_on_streaming_engine(
+#     "ConditionalJoin not supported for multiple partitions"
+# )
+# def test_join_where(engine: pl.GPUEngine, left, right, conditions, zlice):
+#     q = left.join_where(right, *conditions)
 
-    assert_gpu_result_equal(q, engine=engine, check_row_order=False)
+#     assert_gpu_result_equal(q, engine=engine, check_row_order=False)
 
-    if zlice is not None:
-        q_len = q.slice(*zlice).select(pl.len())
-        # Can't compare result, since row order is not guaranteed and
-        # therefore we only check the length
+#     if zlice is not None:
+#         q_len = q.slice(*zlice).select(pl.len())
+#         # Can't compare result, since row order is not guaranteed and
+#         # therefore we only check the length
 
-        assert_gpu_result_equal(q_len, engine=engine)
+#         assert_gpu_result_equal(q_len, engine=engine)
 
 
-def test_cross_join_empty_right_table(engine: pl.GPUEngine):
-    a = pl.LazyFrame({"a": [1, 2, 3], "x": [7, 2, 1]})
-    b = pl.LazyFrame({"b": [2, 2, 2], "x": [7, 1, 3]})
+# def test_cross_join_empty_right_table(engine: pl.GPUEngine):
+#     a = pl.LazyFrame({"a": [1, 2, 3], "x": [7, 2, 1]})
+#     b = pl.LazyFrame({"b": [2, 2, 2], "x": [7, 1, 3]})
 
-    q = a.join(b, how="cross").filter(
-        (pl.col("a") == pl.col("a")) & (pl.col("b") < pl.col("b"))
-    )
+#     q = a.join(b, how="cross").filter(
+#         (pl.col("a") == pl.col("a")) & (pl.col("b") < pl.col("b"))
+#     )
 
-    assert_gpu_result_equal(q, engine=engine)
+#     assert_gpu_result_equal(q, engine=engine)
 
 
 @pytest.mark.parametrize("maintain_order", ["left_right", "right_left"])

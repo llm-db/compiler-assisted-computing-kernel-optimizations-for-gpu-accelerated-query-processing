@@ -112,9 +112,17 @@ def named_expr_cudf_to_triton(expr: NamedExpr, con: ConversionManager, stream):
 def dataframes_cudf_to_triton(*dfs: DataFrame) -> List[TritonDataFrame]:
     return [dataframe_triton_to_cudf(df) for df in dfs]
 
+def schema_cudf_to_triton(schema):
+    d = dict()
+    for s in schema:
+        d[s] = dtype_cudf_to_triton(schema[s])
+    return d
+
 
 def dataframe_cudf_to_triton(df: DataFrame) -> TritonDataFrame:
     df.stream.synchronize()
+    if not isinstance(df, DataFrame):
+        raise ValueError(df)
     triton_cols = [
         column_cudf_to_triton(
             col,
@@ -125,19 +133,19 @@ def dataframe_cudf_to_triton(df: DataFrame) -> TritonDataFrame:
     ]
     return TritonDataFrame(
         triton_cols,
-        stream=torch.cuda.current_stream(),
+        cudf_stream=df.stream,
         num_rows=df._num_rows_override,
     )
 
 
-def dataframe_triton_to_cudf(df: TritonDataFrame, stream) -> DataFrame:
+def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
     """Convert to a cudf DataFrame."""
-    df.stream.synchronize()
+    stream = df.cudf_stream
+    stream.synchronize()
     gpu_cols = []
     for col in df.columns:
         plc_col = plc.Column.from_array(col.obj, stream=stream)
 
-        print(col.validity)
         validity_col = plc.Column.from_array(col.validity, stream=stream)
         validity_mask, null_count = transform.bools_to_mask(
             validity_col, stream=stream
@@ -160,6 +168,8 @@ def column_cudf_to_triton(
     name: str | None = None,
     stream,
 ) -> TritonColumn:
+    if not isinstance(col, Column):
+        raise ValueError(col)
     values_only = col.obj.with_mask(None, 0)
 
     values_capsule = plc.interop.to_dlpack(
