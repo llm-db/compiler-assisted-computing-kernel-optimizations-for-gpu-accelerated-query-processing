@@ -157,9 +157,9 @@ class TritonBinOp(TritonExpr):
         rop: torch.Tensor | plc.Scalar = right.obj
         if left.size != right.size:
             if left.is_scalar:
-                lop = left.obj_scalar()
+                lop = left.obj_scalar(df.stream)
             elif right.is_scalar:
-                rop = right.obj_scalar()
+                rop = right.obj_scalar(df.stream)
             else:
                 print("NO SCALAR DETECTED!")
 

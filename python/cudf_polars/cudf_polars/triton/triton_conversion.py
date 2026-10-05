@@ -1,5 +1,8 @@
 
+import inspect
 from math import e
+import sys
+import traceback
 from typing import List
 
 from numpy import isin
@@ -13,6 +16,7 @@ from cudf_polars.dsl.expressions.binaryop import BinOp
 from cudf_polars.containers.dataframe import DataFrame
 from cudf_polars.dsl.expressions.aggregation import Agg
 from cudf_polars.dsl.expressions.unary import Cast, Len, UnaryFunction
+from cudf_polars.dsl.expressions.boolean import BooleanFunction
 import pylibcudf as plc
 import polars as pl
 
@@ -95,6 +99,19 @@ def _expr_cudf_to_triton(expr: Expr, con: ConversionManager, stream) -> TritonEx
             expr.options, 
             *children     
         )
+    if isinstance(expr, BooleanFunction):
+        if expr.name not in (
+            BooleanFunction.Name.IsNull,
+            BooleanFunction.Name.IsNotNull,
+        ):
+            raise NotImplementedError(expr.name)
+        child = expr_cudf_to_triton(expr.children[0], con, stream)
+        return TritonUnaryFunction(
+            ty,
+            "is_null" if expr.name is BooleanFunction.Name.IsNull else "is_not_null",
+            expr.options,
+            child,
+        )
     if isinstance(expr, ColRef):
         c = con.try_get_conversion(expr.children[0])
         if c == None:
@@ -144,7 +161,10 @@ def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
     stream.synchronize()
     gpu_cols = []
     for col in df.columns:
-        plc_col = plc.Column.from_array(col.obj, stream=stream)
+        if isinstance(col.obj, plc.Column):
+            plc_col = col.obj
+        else:
+            plc_col = plc.Column.from_array(col.obj, stream=stream)
 
         validity_col = plc.Column.from_array(col.validity, stream=stream)
         validity_mask, null_count = transform.bools_to_mask(
@@ -171,6 +191,31 @@ def column_cudf_to_triton(
     if not isinstance(col, Column):
         raise ValueError(col)
     values_only = col.obj.with_mask(None, 0)
+    dtype = dtype_cudf_to_triton(col.dtype)
+
+    # DLPack only describes strided tensors. Nested and other non-primitive
+    # libcudf columns are retained as opaque payloads so unrelated Triton
+    # operations can still consume the rest of the dataframe.
+    if not isinstance(dtype, torch.dtype):
+        validity = None
+        if col.obj.null_mask() is not None:
+            validity_col = transform.mask_to_bools(
+                int(col.obj.null_mask().ptr),
+                col.obj.offset(),
+                col.obj.offset() + col.obj.size(),
+                stream=stream,
+            )
+            validity_capsule = plc.interop.to_dlpack(
+                plc.Table([validity_col]),
+                stream=stream,
+            )
+            validity = torch.from_dlpack(validity_capsule).to(torch.bool)
+        return TritonColumn(
+            column=values_only,
+            validity=validity,
+            name=name,
+            dtype=dtype,
+        )
 
     values_capsule = plc.interop.to_dlpack(
         plc.Table([values_only]),
@@ -178,13 +223,14 @@ def column_cudf_to_triton(
     )
     tensor = torch.from_dlpack(values_capsule).cuda()
 
-    dtype = dtype_cudf_to_triton(col.dtype)
-
+    if tensor.dtype != dtype:
+        tensor = tensor.to(dtype)
     if dtype == torch.bool:
         tensor = tensor.bool()
-
     validity = None
-    if col.obj.null_count() > 0 and col.obj.null_mask() is not None:
+
+    # if '''col.obj.null_count() > 0 and '''col.obj.null_mask() is not None:
+    if col.obj.null_mask() is not None:
         validity_col = transform.mask_to_bools(
             int(col.obj.null_mask().ptr),
             col.obj.offset(),
@@ -198,6 +244,7 @@ def column_cudf_to_triton(
         )
         validity = torch.from_dlpack(validity_capsule).to(torch.bool)
 
+
     return TritonColumn(
         column=tensor,
         validity=validity,
@@ -207,8 +254,8 @@ def column_cudf_to_triton(
 
 
 
-def dtype_cudf_to_triton(ty: DataType) -> torch.dtype:
-    """Convert a Polars dtype to a PyTorch/Triton dtype."""
+def dtype_cudf_to_triton(ty: DataType):
+    """Convert a cudf-polars dtype to a Triton dtype or opaque logical dtype."""
     dtype = ty.polars_type
 
     if isinstance(dtype, pl.Boolean):
@@ -224,7 +271,7 @@ def dtype_cudf_to_triton(ty: DataType) -> torch.dtype:
     elif isinstance(dtype, pl.UInt8):
         return torch.uint8
     elif isinstance(dtype, pl.UInt16):
-        raise NotImplementedError("UInt16 is not supported by PyTorch")
+        return torch.int32
     elif isinstance(dtype, pl.UInt32):
         return torch.uint32
     elif isinstance(dtype, pl.UInt64):
@@ -233,29 +280,32 @@ def dtype_cudf_to_triton(ty: DataType) -> torch.dtype:
         return torch.float32
     elif isinstance(dtype, pl.Float64):
         return torch.float64
-    elif isinstance(dtype, pl.Date):
-        raise NotImplementedError("Date dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.Time):
-        raise NotImplementedError("Time dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.Datetime):
-        raise NotImplementedError("Datetime dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.Duration):
-        raise NotImplementedError("Duration dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.String):
-        raise NotImplementedError("String dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.Decimal):
-        raise NotImplementedError("Decimal dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.Null):
-        raise NotImplementedError("Null dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.List):
-        raise NotImplementedError("List dtype is not supported by PyTorch")
-    elif isinstance(dtype, pl.Struct):
-        raise NotImplementedError("Struct dtype is not supported by PyTorch")
+    elif isinstance(
+        dtype,
+        (
+            pl.Date,
+            pl.Time,
+            pl.Datetime,
+            pl.Duration,
+            pl.String,
+            pl.Decimal,
+            pl.Null,
+            pl.List,
+            pl.Struct,
+        ),
+    ):
+        return dtype
     else:
-        raise NotImplementedError(f"{dtype=} conversion not supported")
+        # Preserve future or extension dtypes as opaque values rather than
+        # requiring every dtype to be understood by the tensor backend.
+        return dtype
 
-def dtype_triton_to_cudf(ty: torch.dtype) -> DataType:
+
+def dtype_triton_to_cudf(ty) -> DataType:
     """Convert a PyTorch/Triton dtype to a cuDF-Polars DataType."""
+
+    if isinstance(ty, DataType):
+        return ty
 
     if ty == torch.bool:
         dtype = pl.Boolean()
@@ -278,9 +328,7 @@ def dtype_triton_to_cudf(ty: torch.dtype) -> DataType:
     elif ty == torch.float64:
         dtype = pl.Float64()
     else:
-        raise NotImplementedError(
-            f"PyTorch dtype {ty} conversion not supported"
-        )
+        return DataType(polars_dtype=ty)
 
     return DataType(
         polars_dtype=dtype,

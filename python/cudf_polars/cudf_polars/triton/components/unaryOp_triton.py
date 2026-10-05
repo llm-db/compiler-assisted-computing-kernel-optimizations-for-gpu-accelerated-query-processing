@@ -44,50 +44,65 @@ class  TritonUnaryFunction(TritonExpr):
     def do_evaluate(
         self, df: TritonDataFrame, *, context: ExecutionContext = ExecutionContext.FRAME
     ) -> TritonColumn:
-        if self.name == "mask_nans":
-            column = self.children[0].evaluate(df, context=context)
-            validity = ~torch.isnan(column.obj)
-            validity &= column.validity
-            return TritonColumn(
-                column.obj,
-                validity=validity,
-                dtype=column.dtype,
-                name=column.name,
-            )
-        if self.name == "round":
-            column = self.children[0].evaluate(df, context=context)
-            decimal_places = self.options[0]
-            return TritonColumn(
-                torch.round(column.obj, decimals=decimal_places),
-                validity=column.validity,
-                dtype=column.dtype,
-                name=column.name,
-            )
-        if self.name == "fill_null":
-            column = self.children[0].evaluate(df, context=context)
-            fill_value = self.children[1]
-            if isinstance(fill_value, TritonLiteral):
-                arg = fill_value.value
-            else:
-                evaluated = fill_value.evaluate(df, context=context)
-                arg = (
-                    evaluated.obj_scalar()
-                    if evaluated.is_scalar
-                    else evaluated.obj
+        with torch.cuda.stream(df.stream):
+            if self.name == "mask_nans":
+                column = self.children[0].evaluate(df, context=context)
+                validity = ~torch.isnan(column.obj)
+                validity &= column.validity
+                return TritonColumn(
+                    column.obj,
+                    validity=validity,
+                    dtype=column.dtype,
+                    name=column.name,
                 )
-            # if not isinstance(arg, TritonColumn):
-            #     arg = (
-            #         TritonColumn(
-            #             [arg],
-            #             dtype=fill_value.dtype,
-            #         )
-            #         .astype(column.dtype, stream=df.stream)
-            #         .obj.to_scalar(stream=df.stream)
-            #     )
-            return replace_null(column, arg, df.stream)
-        raise NotImplementedError(
-            f"Unimplemented unary function {self.name=}"
-        )
+            if self.name in ("is_null", "is_not_null"):
+                column = self.children[0].evaluate(df, context=context)
+                result = column.validity
+                if self.name == "is_null":
+                    result = ~result
+                return TritonColumn(result, dtype=self.dtype, name=column.name)
+            if self.name == "round":
+                column = self.children[0].evaluate(df, context=context)
+                decimal_places = self.options[0]
+                return TritonColumn(
+                    torch.round(column.obj, decimals=decimal_places),
+                    validity=column.validity,
+                    dtype=column.dtype,
+                    name=column.name,
+                )
+            if self.name == "abs":
+                column = self.children[0].evaluate(df, context=context)
+                return TritonColumn(
+                    torch.abs(column.obj),
+                    validity=column.validity,
+                    dtype=column.dtype,
+                    name=column.name,
+                )
+            if self.name == "fill_null":
+                column = self.children[0].evaluate(df, context=context)
+                fill_value = self.children[1]
+                if isinstance(fill_value, TritonLiteral):
+                    arg = fill_value.value
+                else:
+                    evaluated = fill_value.evaluate(df, context=context)
+                    arg = (
+                        evaluated.obj_scalar(df.stream)
+                        if evaluated.is_scalar
+                        else evaluated.obj
+                    )
+                # if not isinstance(arg, TritonColumn):
+                #     arg = (
+                #         TritonColumn(
+                #             [arg],
+                #             dtype=fill_value.dtype,
+                #         )
+                #         .astype(column.dtype, stream=df.stream)
+                #         .obj.to_scalar(stream=df.stream)
+                #     )
+                return replace_null(column, arg, df.stream)
+            raise NotImplementedError(
+                f"Unimplemented unary function {self.name=}"
+            )
 
 
 class TritonCast(TritonExpr):
@@ -166,4 +181,3 @@ def replace_null(col: TritonColumn, val, stream: torch.Stream) -> TritonColumn:
         null_order=col.null_order,
         name=col.name
     )
-

@@ -2,12 +2,15 @@ from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
+from polars import DataType
 import pylibcudf as plc
 import torch
 
 
 class TritonColumn:
-    obj: torch.Tensor
+    # Tensor-backed columns are used by Triton operators. Other payloads (for
+    # example libcudf list columns) are carried through without interpretation.
+    obj: Any
     validity: torch.Tensor
     is_sorted: plc.types.Sorted
     order: plc.types.Order
@@ -17,12 +20,12 @@ class TritonColumn:
     # Optional name, only ever set by evaluation of NamedExpr nodes
     # The internal evaluation should not care about the name.
     name: str | None
-    dtype: torch.dtype
+    dtype: DataType | torch.dtype
 
     def __init__(
         self,
-        column: Iterable[Any] | torch.Tensor,
-        dtype: torch.dtype,
+        column: Iterable[Any] | torch.Tensor | Any,
+        dtype: DataType | torch.dtype,
         *,
         validity: Iterable[Any] | torch.Tensor | None = None,
         is_sorted: plc.types.Sorted = plc.types.Sorted.NO,
@@ -30,14 +33,24 @@ class TritonColumn:
         null_order: plc.types.NullOrder = plc.types.NullOrder.BEFORE,
         name: str | None = None,
     ):
-        # Converts any non-tensor iterable to a tensor without copying if already a tensor
-        if not isinstance(column, torch.Tensor):
+        if isinstance(column, torch.Tensor):
+            self.obj = column
+        elif isinstance(column, Iterable) and not hasattr(column, "size"):
             self.obj = torch.as_tensor(column)
         else:
+            # Keep non-tensor column representations (such as nested libcudf
+            # columns) opaque until an operator explicitly supports them.
             self.obj = column
 
         if validity is None:
-            self.validity = torch.ones_like(self.obj, device=column.device, dtype=torch.bool)
+            if isinstance(self.obj, torch.Tensor):
+                self.validity = torch.ones_like(
+                    self.obj, device=self.obj.device, dtype=torch.bool
+                )
+            else:
+                self.validity = torch.ones(
+                    self.size, dtype=torch.bool
+                )
         elif isinstance(validity, torch.Tensor):
             self.validity = validity
         else:
@@ -51,9 +64,18 @@ class TritonColumn:
     @property
     def size(self) -> int:
         """Return the size of the column."""
+        size = getattr(self.obj, "size", None)
+        if callable(size):
+            size = size()
+        if size is None and isinstance(self.obj, plc.Column):
+            size = self.obj.size()
+        if isinstance(size, torch.Size):
+            return size[0]
+        if size is not None:
+            return size
         return len(self.obj)
 
-    def obj_scalar(self):
+    def obj_scalar(self, stream):
         """
         A copy of the column object as a pylibcudf Scalar.
 
@@ -69,9 +91,14 @@ class TritonColumn:
         ValueError
             If the column is not length-1.
         """
+        # TODO: Handle stream
         if not self.is_scalar:
             raise ValueError(f"Cannot convert a column of length {self.size} to scalar")
-        return self.obj[0]
+        if not bool(self.validity[0].item()):
+            return None
+        if isinstance(self.obj, torch.Tensor):
+            return self.obj[0].item()
+        return self.obj.to_arrow(stream=stream).to_pylist()[0]
 
 
     def set_sorted(
@@ -103,6 +130,8 @@ class TritonColumn:
         self.order = order
         self.null_order = null_order
         return self
+
+
 
     def rename(self, name: str | None, /):
         """

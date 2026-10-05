@@ -19,11 +19,11 @@ def test_merge_sorted_without_nulls(engine: pl.GPUEngine, descending, request):
         )
     )
     df0 = pl.LazyFrame(
-        {"name": ["steve", "elise", "bob"], "age": [42, 44, 18], "height": [5, 6, 5]}
+        {"name": [1, 2, 3], "age": [42, 44, 18], "height": [5, 6, 5]}
     ).sort("age", descending=descending)
     df1 = pl.LazyFrame(
         {
-            "name": ["anna", "megan", "steve", "thomas"],
+            "name": [4, 5, 1, 6],
             "age": [21, 33, 42, 20],
             "height": [5, 5, 5, 5],
         }
@@ -45,14 +45,14 @@ def test_merge_sorted_without_nulls(engine: pl.GPUEngine, descending, request):
 def test_merge_sorted_with_nulls(engine: pl.GPUEngine, descending):
     df0 = pl.LazyFrame(
         {
-            "name": ["steve", "elise", "bob", "john"],
+            "name": [1, 1, 3, 7],
             "age": [42, 44, 18, None],
             "height": [5, 6, 7, 5],
         }
     ).sort("age", descending=descending)
     df1 = pl.LazyFrame(
         {
-            "name": ["anna", "megan", "steve", "thomas", "john"],
+            "name": [4, 5, 1, 6, 7],
             "age": [21, 33, 42, 20, None],
             "height": [5, 5, 5, 5, 5],
         }

@@ -1,19 +1,32 @@
 
-
 from ast import BinOp
 import itertools
-from typing import Any
+import sys
+import time
+from typing import Any, Sequence
 
 import torch
+import pyarrow as pa
+import polars as pl
 
+from cudf_polars.containers import DataType
+from cudf_polars.triton.triton_conversion import dtype_triton_to_cudf
 from cudf_polars.triton.components.dataframe_triton import TritonDataFrame
 from cudf_polars.triton.components.column_triton import TritonColumn
-from cudf_polars.triton.utils_triton import broadcast_triton, stream_ordered_after
-from cudf_polars.triton.components.base_triton import TritonExpr, TritonNamedExpr
+from cudf_polars.triton.utils_triton import broadcast_triton, concatonate_dataframes, stream_ordered_after
+from cudf_polars.triton.components.base_triton import (
+    TritonCol,
+    TritonExpr,
+    TritonNamedExpr,
+)
 from cudf_polars.typing import Schema, Slice as Zlice
-from cudf_polars.triton.components.join_triton import join_coalesce, join_gather, join_gather_column, join_pairs
+from cudf_polars.triton.triton_operations.join_triton import join_coalesce, join_gather, join_gather_column, join_pairs
 from cudf_polars.triton.components.binOp_triton import TritonBinOp
+from cudf_polars.triton.components.agg_triton import TritonAgg
 import pylibcudf as plc
+
+from cudf_polars.triton.triton_operations.sort_triton import apply_sort, sort_indices
+from cudf_polars.triton.triton_operations.distinct_triton import distinct_triton_indices
 
 
 def join_triton(
@@ -28,8 +41,8 @@ def join_triton(
 
     with context.stream_ordered_after(left, right) as stream:
         how, nulls_equal, zlice, suffix, coalesce, maintain_order = options
-        left_keys = list(broadcast_triton(*(key.evaluate(left) for key in left_on), target_length=left.num_rows))
-        right_keys = list(broadcast_triton(*(key.evaluate(right) for key in right_on), target_length=right.num_rows))
+        left_keys = list(broadcast_triton(*(key.evaluate(left) for key in left_on), target_length=left.num_rows, stream=left.stream))
+        right_keys = list(broadcast_triton(*(key.evaluate(right) for key in right_on), target_length=right.num_rows, stream=right.stream))
         left_indices, right_indices = join_pairs(
             left_keys,
             right_keys,
@@ -85,7 +98,7 @@ def hconcat_triton(
         # Used to recombine decomposed expressions
         if should_broadcast:
             bcols = broadcast_triton(
-                *itertools.chain.from_iterable(df.columns for df in dfs),
+                *itertools.chain.from_iterable(df.columns for df in dfs), stream=stream
             )
             by_name = {c.name: c for c in bcols}
             ordered = [by_name[name] for name in schema]
@@ -131,10 +144,13 @@ def hstack_triton(
 ) -> TritonDataFrame:
     """Evaluate and return a dataframe."""
     columns = [c.evaluate(df) for c in exprs]
+    for c in columns:
+        print(c.obj, c.validity, should_broadcast)
     if should_broadcast:
         columns = broadcast_triton(
             *columns,
             target_length=df.num_rows if df.num_columns != 0 else None,
+            stream=df.stream
         )
     else:  # pragma: no cover; streaming rewrites HStack(False)
         # Polars ensures this is true, but let's make sure nothing
@@ -151,39 +167,101 @@ def hstack_triton(
 def distinct_triton(
     df: TritonDataFrame,
     keep: plc.stream_compaction.DuplicateKeepOption,
-    subset: frozenset[str] | None,
+    rowSubset: frozenset[str] | None,
+    zlice: Zlice | None,
+) -> TritonDataFrame:
+    """Evaluate and return a dataframe."""
+    n = df.num_rows
+
+    if n == 0:
+        return df.slice(zlice)
+
+    if rowSubset is None:
+        key_columns = list(df.columns)
+    else:
+        key_columns = [
+            df.column_map[name]
+            for name in rowSubset
+        ]
+
+    keys_sorted = all(
+        column.is_sorted == plc.types.Sorted.YES
+        for column in key_columns
+    )
+
+    if keys_sorted:
+        indices = torch.arange(
+            n,
+            device=df.columns[0].obj.device,
+            dtype=torch.int64,
+        )
+    else:
+        # Distinct doesn't specify output order, so sorting by the
+        # distinct keys is a valid implementation strategy.
+        #
+        # Use ascending / null-before for all keys. Stable sorting also
+        # means that equal keys retain their original row order.
+        indices = sort_indices(
+            key_columns,
+            order=[
+                plc.types.Order.ASCENDING
+                for _ in key_columns
+            ],
+            null_order=[
+                plc.types.NullOrder.BEFORE
+                for _ in key_columns
+            ],
+            stream=df.stream
+        )
+
+    selected = distinct_triton_indices(key_columns, indices, keep)
+    new_columns = [
+        TritonColumn(
+            old.obj[selected],
+            dtype=old.dtype,
+            validity=old.validity[selected],
+            name=old.name,
+            is_sorted=(
+                plc.types.Sorted.YES
+                if keys_sorted
+                else plc.types.Sorted.NO
+            ),
+            order=old.order,
+            null_order=old.null_order,
+        )
+        for old in df.columns
+    ]
+
+
+    result = TritonDataFrame(
+        new_columns,
+        cudf_stream=df.cudf_stream,
+    )
+
+    if keys_sorted:
+        result = result.sorted_like(df)
+
+    return result.slice(zlice)
+
+def sort_triton(
+    df: TritonDataFrame,
+    by: Sequence[TritonNamedExpr],
+    order: Sequence[plc.types.Order],
+    null_order: Sequence[plc.types.NullOrder],
+    stable: bool,  # noqa: FBT001
     zlice: Zlice | None,
 ) -> TritonDataFrame:
     """Evaluate and return a dataframe."""
 
-    # if subset is None:
-    #     indices = list(range(df.num_columns))
-    #     keys_sorted = all(c.is_sorted for c in df.column_map.values())
-    # else:
-    #     indices = [i for i, k in enumerate(df.column_names) if k in subset]
-    #     keys_sorted = all(df.column_map[name].is_sorted for name in subset)
-    # if keys_sorted:
-    #     pass
-    # else:
-    #     # table = #TODO Fn
-    #     # (
-    #     #     df.table,
-    #     #     indices,
-    #     #     keep,
-    #     #     df.stream,
-    #     # )
-    # # TODO: Is this sortedness setting correct
-    # result = TritonDataFrame(
-    #     [
-    #         TritonColumn(new, name=old.name, dtype=old.dtype).sorted_like(old)
-    #         for new, old in zip(table.columns(), df.columns, strict=True)
-    #     ],
-    #     stream=df.cudf_stream,
-    # )
-    # if keys_sorted:
-    #     result = result.sorted_like(df)
-    # return result.slice(zlice)
-    
+    sort_keys = broadcast_triton(
+        *(k.evaluate(df) for k in by), target_length=df.num_rows, stream=df.stream
+    )
+    indices = sort_indices(sort_keys, order,null_order, df.stream)
+    result = TritonDataFrame(
+        [apply_sort(col, indices, order, null_order, df.stream) for col in df.columns],
+        df.cudf_stream
+    )
+    return result.slice(zlice)
 
 
 def conditional_join_triton(
@@ -241,25 +319,21 @@ def conditional_join_triton(
 
 def filter_triton(df: TritonDataFrame, mask: TritonExpr) -> TritonDataFrame:
     ev = mask.evaluate(df)
-    (mask,) = broadcast_triton(ev, target_length=df.num_rows)
+    (mask,) = broadcast_triton(ev, target_length=df.num_rows, stream=df.stream)
     df2 = df.filter(mask)
     return df2
 
-def union_triton(df: TritonDataFrame, zlice: Zlice) -> TritonDataFrame:
-
-    ev = mask.evaluate(df)
-    (mask,) = broadcast_triton(ev, target_length=df.num_rows)
-    df2 = df.filter(mask)
-    return df2
+def union_triton(*dfs: TritonDataFrame, zlice: Zlice, context) -> TritonDataFrame:
+    return concatonate_dataframes(*dfs, context=context).slice(zlice)
 
 def select_triton(df: TritonDataFrame, exprs: tuple[TritonNamedExpr, ...], should_broadcast: bool) -> TritonDataFrame:
     columns = [e.evaluate(df) for e in exprs]
     if should_broadcast:
-        columns = broadcast_triton(*columns)
+        columns = broadcast_triton(*columns, stream=df.stream)
     return TritonDataFrame(columns, df.cudf_stream)
 
 def reduce_triton(df: TritonDataFrame, exprs: tuple[TritonNamedExpr, ...]) -> TritonDataFrame:
-    columns = broadcast_triton(*(expr.evaluate(df) for expr in exprs))
+    columns = broadcast_triton(*(expr.evaluate(df) for expr in exprs), stream=df.stream)
     columns = [column.rename(expr.name) for column, expr in zip(columns, exprs, strict=True)]
     return TritonDataFrame(columns, df.cudf_stream)
 
@@ -387,7 +461,7 @@ def groupby_triton(
     zlice: Zlice | None,
 ) -> TritonDataFrame:
     key_columns = broadcast_triton(
-        *(key.evaluate(df) for key in keys), target_length=df.num_rows
+        *(key.evaluate(df) for key in keys), target_length=df.num_rows, stream=df.stream
     )
     key_values = [key.obj.cpu().tolist() for key in key_columns]
     key_validities = [
@@ -408,16 +482,40 @@ def groupby_triton(
         groups = dict(sorted(groups.items(), key=lambda item: item[0]))
 
     result_columns = []
+
+    def take_column(column: TritonColumn, indices: torch.Tensor) -> TritonColumn:
+        if isinstance(column.obj, plc.Column):
+            indices_col = plc.Column.from_array(indices, stream=df.cudf_stream)
+            (obj,) = plc.copying.gather(
+                plc.Table([column.obj]),
+                indices_col,
+                plc.copying.OutOfBoundsPolicy.DONT_CHECK,
+                stream=df.cudf_stream,
+            ).columns()
+            return TritonColumn(
+                obj,
+                dtype=column.dtype,
+                validity=column.validity.to(indices.device)[indices],
+                name=column.name,
+            )
+        return TritonColumn(
+            column.obj.index_select(0, indices),
+            validity=None
+            if column.validity is None
+            else column.validity.index_select(0, indices),
+            dtype=column.dtype,
+            name=column.name,
+        )
     for key, key_column in zip(keys, key_columns, strict=True):
         group_rows = [rows[0] for rows in groups.values()]
         result_columns.append(
             TritonColumn(
-                key_column.obj.index_select(
-                    0,
+                take_column(
+                    key_column,
                     torch.tensor(
-                        group_rows, device=key_column.obj.device, dtype=torch.long
+                        group_rows, device=df.stream.device, dtype=torch.long
                     ),
-                ),
+                ).obj,
                 validity=torch.tensor(
                     [
                         True
@@ -438,43 +536,69 @@ def groupby_triton(
     for agg in aggs:
         result_values = []
         result_validity = []
+        result_list_dtype = agg.value.dtype
         for rows in groups.values():
             indices = torch.tensor(rows, device=df.stream.device, dtype=torch.long)
             subgroup = TritonDataFrame(
                 [
-                    TritonColumn(
-                        column.obj.index_select(0, indices),
-                        validity=None
-                        if column.validity is None
-                        else column.validity.index_select(0, indices),
-                        dtype=column.dtype,
-                        name=column.name,
-                    )
+                    take_column(column, indices)
                     for column in df.columns
                 ],
                 df.cudf_stream,
             )
             result = agg.evaluate(subgroup)
-            result_values.append(result.obj[0])
-            result_validity.append(
-                bool(result.validity[0].item())
+            if not isinstance(agg.value, TritonAgg) and isinstance(
+                result.obj, torch.Tensor
+            ):
+                result_values.append(
+                    plc.Column.from_arrow(
+                        pa.array([result.obj.cpu().tolist()]),
+                        stream=df.cudf_stream,
+                    )
+                )
+                result_list_dtype = DataType(
+                    pl.List(dtype_triton_to_cudf(agg.value.dtype).polars_type)
+                )
+                result_validity.append(True)
+                continue
+            if isinstance(result.obj, plc.Column):
+                result_values.append(result.obj)
+            else:
+                result_values.append(result.obj[0].detach().cpu())
+            result_validity.append(bool(result.validity[0].detach().cpu().item()))
+        if result_values and isinstance(result_values[0], plc.Column):
+            result = plc.Column.from_arrow(
+                pa.concat_arrays([value.to_arrow(stream=df.cudf_stream)
+                                  for value in result_values]),
+                stream=df.cudf_stream,
             )
-        result_columns.append(
-            TritonColumn(
-                torch.stack(result_values)
-                if result_values
-                else torch.empty(
-                    0, device=df.columns[0].obj.device, dtype=agg.value.dtype
-                ),
-                validity=torch.tensor(
-                    result_validity,
-                    device=df.stream.device,
-                    dtype=torch.bool,
-                ),
-                dtype=agg.value.dtype,
-                name=agg.name,
+            result_columns.append(
+                TritonColumn(
+                    result,
+                    validity=torch.tensor(
+                        result_validity, device=df.stream.device, dtype=torch.bool
+                    ),
+                    dtype=result_list_dtype,
+                    name=agg.name,
+                )
             )
-        )
+        else:
+            result_columns.append(
+                TritonColumn(
+                    torch.stack(result_values).to(device=df.stream.device)
+                    if result_values
+                    else torch.empty(
+                        0, device=df.columns[0].obj.device, dtype=agg.value.dtype
+                    ),
+                    validity=torch.tensor(
+                        result_validity,
+                        device=df.stream.device,
+                        dtype=torch.bool,
+                    ),
+                    dtype=agg.value.dtype,
+                    name=agg.name,
+                )
+            )
 
     return TritonDataFrame(result_columns, df.cudf_stream).slice(zlice)
 
@@ -485,7 +609,8 @@ def projection_triton(df: TritonDataFrame, schema: Schema) -> TritonDataFrame:
     # This can reorder things.
     columns = broadcast_triton(
         *(df.column_map[name] for name in schema),
-        target_length=df.num_rows
+        target_length=df.num_rows,
+        stream=df.stream
     )
     return TritonDataFrame(columns, df.cudf_stream)
 
@@ -589,5 +714,3 @@ def merge_sorted_triton(*dfs: TritonDataFrame, key: str) -> TritonDataFrame:
         #     left.dtypes,
         #     stream=stream,
         # )
-
-

@@ -1,5 +1,7 @@
 from typing import Any
 
+import pyarrow as pa
+import pylibcudf as plc
 import torch
 
 from cudf_polars.triton.components.base_triton import ExecutionContext, TritonExpr
@@ -54,6 +56,16 @@ class TritonAgg(TritonExpr):
                 [values.numel() if self.options else valid_values.numel()],
                 device=values.device,
                 dtype=self.dtype,
+            )
+            return TritonColumn(result, dtype=self.dtype)
+
+        if self.name == "collect_list":
+            if isinstance(values, plc.Column):
+                raise NotImplementedError(
+                    "collect_list for nested columns is not supported by Triton"
+                )
+            result = plc.Column.from_arrow(
+                pa.array([valid_values.cpu().tolist()]), stream=df.cudf_stream
             )
             return TritonColumn(result, dtype=self.dtype)
 

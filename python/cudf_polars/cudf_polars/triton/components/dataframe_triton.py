@@ -246,6 +246,39 @@ class TritonDataFrame:
             (column for column in self.columns if column.name not in names),
             self.cudf_stream,
         )
+
+    def sorted_like(
+        self, like, /, *, subset: Set[str] | None = None
+    ) -> Self:
+        """
+        Return a shallow copy with sortedness copied from like.
+
+        Parameters
+        ----------
+        like
+            The dataframe to copy from
+        subset
+            Optional subset of columns from which to copy data.
+
+        Returns
+        -------
+        Shallow copy of self with metadata set.
+
+        Raises
+        ------
+        ValueError
+            If there is a name mismatch between self and like.
+        """
+        if like.column_names != self.column_names:
+            raise ValueError("Can only copy from identically named frame")
+        subset = self.column_names_set if subset is None else subset
+        return type(self)(
+            (
+                c.sorted_like(other) if c.name in subset else c
+                for c, other in zip(self.columns, like.columns, strict=True)
+            ),
+            stream=self.cudf_stream,
+        )
     
     def select_columns(self, names: Set[str]) -> list[TritonColumn]:
         """Select columns by name."""
@@ -371,11 +404,14 @@ class TritonDataFrame:
         value_rows = []
 
         for col in self.columns:
-            values = col.obj[:max_rows]
-
-            # Convert tensors to Python values. This works for CUDA tensors
-            # as well, although it necessarily synchronizes/copies them.
-            values = values.detach().cpu().tolist()
+            if isinstance(col.obj, torch.Tensor):
+                # Convert tensors to Python values. This works for CUDA
+                # tensors as well, although it necessarily synchronizes.
+                values = col.obj[:max_rows].detach().cpu().tolist()
+            else:
+                values = col.obj.to_arrow(stream=self.cudf_stream).to_pylist()[
+                    :max_rows
+                ]
 
             if col.validity is not None:
                 validity = col.validity[:max_rows].detach().cpu().tolist()
