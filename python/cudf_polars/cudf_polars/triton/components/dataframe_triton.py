@@ -87,7 +87,7 @@ class TritonDataFrame:
         if not self.columns:
             return 0
 
-        return len(self.columns[0].obj)
+        return self.columns[0].size
     
     def filter(self, mask: TritonColumn):
         """

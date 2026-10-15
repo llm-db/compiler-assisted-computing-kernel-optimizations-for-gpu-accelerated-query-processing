@@ -166,11 +166,12 @@ def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
         else:
             plc_col = plc.Column.from_array(col.obj, stream=stream)
 
-        validity_col = plc.Column.from_array(col.validity, stream=stream)
-        validity_mask, null_count = transform.bools_to_mask(
-            validity_col, stream=stream
-        )
-        plc_col = plc_col.with_mask(validity_mask, null_count)
+        if col.validity is not None and not isinstance(col.obj, plc.Column):
+            validity_col = plc.Column.from_array(col.validity, stream=stream)
+            validity_mask, null_count = transform.bools_to_mask(
+                validity_col, stream=stream
+            )
+            plc_col = plc_col.with_mask(validity_mask, null_count)
 
         # Reconstruct Column wrapping the plc.Column object
         gpu_col = Column(

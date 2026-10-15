@@ -29,7 +29,6 @@ def _sort_one_key(
     null_indices = indices[~valid]
 
     if valid_indices.numel() > 1:
-        print(valid_indices, key.obj)
         valid_values = key.obj[valid_indices]
 
         descending = order == plc.types.Order.DESCENDING

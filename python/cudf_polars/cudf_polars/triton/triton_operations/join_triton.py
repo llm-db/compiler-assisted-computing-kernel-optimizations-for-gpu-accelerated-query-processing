@@ -1,15 +1,11 @@
 
 
-from typing import Callable
-
 import torch
-import pylibcudf as plc
 
 from cudf_polars.triton.components.column_triton import TritonColumn
 from cudf_polars.typing import Slice as Zlice
 from cudf_polars.triton.components.dataframe_triton import TritonDataFrame
-from cudf_polars.triton.components.base_triton import TritonColRef, TritonExpr, TritonNamedExpr
-from cudf_polars.triton.components.literal_triton import TritonLiteral
+from cudf_polars.triton.components.base_triton import TritonNamedExpr
 
 
 def join_gather_column(
@@ -113,47 +109,97 @@ def join_gather_column(
 #             walk(c)
 #     walk(expr)
 
-def equal_match(left_key: TritonColumn, right_key: TritonColumn, nulls_equal: bool,) -> torch.Tensor: 
-    equal = left_key.obj[:, None] == right_key.obj[None, :] 
-    left_valid = left_key.validity 
-    right_valid = right_key.validity 
-    both_valid = left_valid[:, None] & right_valid[None, :] 
+def _join_key_rows(
+    keys: list[TritonColumn], nulls_equal: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return a compact row key and a mask for rows eligible to match."""
+    if not keys:
+        raise ValueError("A join requires at least one key")
 
-    if nulls_equal: 
-        return ( (equal & both_valid) | (~left_valid[:, None] & ~right_valid[None, :]) ) 
-    return equal & both_valid
+    values = []
+    valid = []
+    value_dtype = keys[0].obj.dtype
+    for key in keys[1:]:
+        value_dtype = torch.promote_types(value_dtype, key.obj.dtype)
+    for key in keys:
+        key_valid = key.validity.to(dtype=torch.bool)
+        key_values = key.obj.to(dtype=value_dtype)
+        values.append(torch.where(key_valid, key_values, torch.zeros_like(key_values)))
+        valid.append(key_valid.to(dtype=value_dtype))
 
-def generate_dataframe_matches(
-    left_keys: TritonDataFrame,
-    right_keys: TritonDataFrame,
-    nulls_equal: bool,
-    match_fn: Callable[[TritonDataFrame, TritonDataFrame], torch.Tensor],
-    *,
-    device: torch.device
-) -> torch.Tensor:
-    n_left = left_keys.num_rows
-    n_right = right_keys.num_rows
-    matches = torch.ones((n_left, n_right), device=device, dtype=torch.bool)
-    for left_key, right_key in zip(left_keys, right_keys, strict=True):
-        matches &= match_fn(left_key, right_key, nulls_equal)
-    return matches
+    # Including validity in the key makes nulls equal to nulls only.  When
+    # nulls are not equal, filtering rows with any null is sufficient and
+    # avoids introducing a row-specific sentinel into the key.
+    key_rows = torch.stack([*values, *valid], dim=1)
+    matchable = (
+        torch.stack(valid, dim=1).all(dim=1)
+        if not nulls_equal
+        else torch.ones_like(valid[0], dtype=torch.bool)
+    )
+    return key_rows, matchable
 
-def generate_column_matches(
+
+def _grouped_join_pairs(
     left_keys: list[TritonColumn],
     right_keys: list[TritonColumn],
     nulls_equal: bool,
-    match_fn: Callable[[TritonColumn, TritonColumn], torch.Tensor],
     *,
     device: torch.device,
-    n_left: int,
-    n_right: int,
-) -> torch.Tensor:
-    matches = torch.ones((n_left, n_right), device=device, dtype=torch.bool)
-    for left_key, right_key in zip(left_keys, right_keys, strict=True):
-        matches &= match_fn(left_key, right_key, nulls_equal)
-    return matches
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build matching pairs without materializing a pairwise match matrix."""
+    left_rows, left_matchable = _join_key_rows(left_keys, nulls_equal)
+    right_rows, right_matchable = _join_key_rows(right_keys, nulls_equal)
 
+    left_ids = torch.full(
+        (left_rows.shape[0],), -1, device=device, dtype=torch.long
+    )
+    right_ids = torch.full(
+        (right_rows.shape[0],), -1, device=device, dtype=torch.long
+    )
+    matchable_rows = torch.cat(
+        (left_rows[left_matchable], right_rows[right_matchable]), dim=0
+    )
+    if matchable_rows.numel() == 0:
+        return (
+            torch.empty(0, device=device, dtype=torch.long),
+            torch.empty(0, device=device, dtype=torch.long),
+        )
 
+    _, inverse = torch.unique(matchable_rows, dim=0, return_inverse=True)
+    n_left_matchable = int(left_matchable.sum().item())
+    left_ids[left_matchable] = inverse[:n_left_matchable]
+    right_ids[right_matchable] = inverse[n_left_matchable:]
+
+    n_groups = int(inverse.max().item()) + 1
+    left_counts = torch.bincount(left_ids[left_ids >= 0], minlength=n_groups)
+    right_counts = torch.bincount(right_ids[right_ids >= 0], minlength=n_groups)
+    left_rows_by_group = torch.argsort(left_ids)
+    right_rows_by_group = torch.argsort(right_ids)
+    left_rows_by_group = left_rows_by_group[left_ids[left_rows_by_group] >= 0]
+    right_rows_by_group = right_rows_by_group[right_ids[right_rows_by_group] >= 0]
+
+    pair_counts = left_counts * right_counts
+    total_pairs = int(pair_counts.sum().item())
+    if total_pairs == 0:
+        return (
+            torch.empty(0, device=device, dtype=torch.long),
+            torch.empty(0, device=device, dtype=torch.long),
+        )
+
+    group = torch.repeat_interleave(
+        torch.arange(n_groups, device=device), pair_counts
+    )
+    group_starts = torch.cumsum(pair_counts, dim=0) - pair_counts
+    pair_offset = torch.arange(total_pairs, device=device) - group_starts[group]
+    left_rank = torch.div(pair_offset, right_counts[group], rounding_mode="floor")
+    right_rank = pair_offset.remainder(right_counts[group])
+    left_starts = torch.cumsum(left_counts, dim=0) - left_counts
+    right_starts = torch.cumsum(right_counts, dim=0) - right_counts
+    left_pairs = left_rows_by_group[left_starts[group] + left_rank]
+    right_pairs = right_rows_by_group[right_starts[group] + right_rank]
+    order = torch.argsort(right_pairs, stable=True)
+    order = order[torch.argsort(left_pairs[order], stable=True)]
+    return left_pairs[order], right_pairs[order]
 
 def join_pairs(
     left_keys: list[TritonColumn],
@@ -172,41 +218,37 @@ def join_pairs(
             torch.arange(n_right, device=device).repeat(n_left),
         )
 
-    matches = generate_column_matches(
-        left_keys,
-        right_keys,
-        nulls_equal,
-        match_fn=equal_match,
-        device=device,
-        n_left=n_left,
-        n_right=n_right
+    matched_left, matched_right = _grouped_join_pairs(
+        left_keys, right_keys, nulls_equal, device=device
     )
-
-    matched_left, matched_right = torch.nonzero(matches, as_tuple=True)
     if how == "Inner":
         return matched_left, matched_right
+    left_matched = torch.zeros(n_left, device=device, dtype=torch.bool)
+    right_matched = torch.zeros(n_right, device=device, dtype=torch.bool)
+    left_matched[matched_left] = True
+    right_matched[matched_right] = True
     if how == "Semi":
-        return torch.nonzero(matches.any(dim=1), as_tuple=True)[0], torch.empty(
+        return torch.nonzero(left_matched, as_tuple=True)[0], torch.empty(
             0, device=device, dtype=torch.long
         )
     if how == "Anti":
-        return torch.nonzero(~matches.any(dim=1), as_tuple=True)[0], torch.empty(
+        return torch.nonzero(~left_matched, as_tuple=True)[0], torch.empty(
             0, device=device, dtype=torch.long
         )
 
     if how == "Left":
-        unmatched = torch.nonzero(~matches.any(dim=1), as_tuple=True)[0]
+        unmatched = torch.nonzero(~left_matched, as_tuple=True)[0]
         return torch.cat((matched_left, unmatched)), torch.cat(
             (matched_right, torch.full_like(unmatched, -1))
         )
     if how == "Right":
-        unmatched = torch.nonzero(~matches.any(dim=0), as_tuple=True)[0]
+        unmatched = torch.nonzero(~right_matched, as_tuple=True)[0]
         return torch.cat((matched_left, torch.full_like(unmatched, -1))), torch.cat(
             (matched_right, unmatched)
         )
     if how == "Full":
-        unmatched_left = torch.nonzero(~matches.any(dim=1), as_tuple=True)[0]
-        unmatched_right = torch.nonzero(~matches.any(dim=0), as_tuple=True)[0]
+        unmatched_left = torch.nonzero(~left_matched, as_tuple=True)[0]
+        unmatched_right = torch.nonzero(~right_matched, as_tuple=True)[0]
         return (
             torch.cat((matched_left, unmatched_left, torch.full_like(unmatched_right, -1))),
             torch.cat((matched_right, torch.full_like(unmatched_left, -1), unmatched_right)),

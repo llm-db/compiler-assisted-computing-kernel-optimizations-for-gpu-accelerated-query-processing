@@ -453,6 +453,39 @@ def rolling_triton(
 
     return TritonDataFrame(result_columns, df.cudf_stream).slice(zlice)
 
+
+def _triton_column_to_plc(column: TritonColumn, stream) -> plc.Column:
+    """Convert a Triton column to a libcudf column without a host round trip."""
+    if isinstance(column.obj, plc.Column):
+        result = column.obj
+    else:
+        result = plc.Column.from_array(column.obj, stream=stream)
+    if column.validity is None:
+        return result
+    validity = plc.Column.from_array(column.validity, stream=stream)
+    mask, null_count = plc.transform.bools_to_mask(validity, stream=stream)
+    return result.with_mask(mask, null_count)
+
+
+def _plc_column_to_triton(
+    column: plc.Column, dtype, name: str, stream
+) -> TritonColumn:
+    """Wrap a libcudf result while retaining its null mask as a device tensor."""
+    if column.null_mask() is None:
+        validity = None
+    else:
+        validity_column = plc.transform.mask_to_bools(
+            int(column.null_mask().ptr),
+            column.offset(),
+            column.offset() + column.size(),
+            stream=stream,
+        )
+        validity = torch.from_dlpack(
+            plc.interop.to_dlpack(plc.Table([validity_column]), stream=stream)
+        ).to(torch.bool)
+    return TritonColumn(column, dtype=dtype, validity=validity, name=name)
+
+
 def groupby_triton(
     df: TritonDataFrame,
     keys: tuple[TritonNamedExpr, ...],
@@ -463,6 +496,70 @@ def groupby_triton(
     key_columns = broadcast_triton(
         *(key.evaluate(df) for key in keys), target_length=df.num_rows, stream=df.stream
     )
+
+    # Keep the grouped operation on the device.  The previous implementation
+    # materialized every key on the CPU and then evaluated each group
+    # separately, which made the cost proportional to the number of rows and
+    # groups in Python.
+    if not maintain_order and all(isinstance(agg.value, TritonAgg) for agg in aggs):
+        try:
+            grouper = plc.groupby.GroupBy(
+                plc.Table(
+                    [
+                        _triton_column_to_plc(column, df.cudf_stream)
+                        for column in key_columns
+                    ]
+                ),
+                null_handling=plc.types.NullPolicy.INCLUDE,
+                keys_are_sorted=(
+                    plc.types.Sorted.YES
+                    if all(
+                        key.is_sorted == plc.types.Sorted.YES
+                        for key in key_columns
+                    )
+                    else plc.types.Sorted.NO
+                ),
+                column_order=[key.order for key in key_columns],
+                null_precedence=[key.null_order for key in key_columns],
+            )
+            requests = []
+            for agg in aggs:
+                value = agg.value
+                child = value.children[0].evaluate(df)
+                requests.append(
+                    plc.groupby.GroupByRequest(
+                        _triton_column_to_plc(child, df.cudf_stream),
+                        [value.agg_request],
+                    )
+                )
+            grouped_keys, grouped_values = grouper.aggregate(
+                requests, stream=df.cudf_stream
+            )
+            result_columns = [
+                _plc_column_to_triton(
+                    column, key.value.dtype, key.name, df.cudf_stream
+                )
+                for key, column in zip(keys, grouped_keys.columns(), strict=True)
+            ]
+            result_columns.extend(
+                _plc_column_to_triton(
+                    column,
+                    agg.value.dtype,
+                    agg.name,
+                    df.cudf_stream,
+                )
+                for agg, column in zip(
+                    aggs,
+                    (column for table in grouped_values for column in table.columns()),
+                    strict=True,
+                )
+            )
+            return TritonDataFrame(result_columns, df.cudf_stream).slice(zlice)
+        except NotImplementedError:
+            # The Python implementation below handles expression and
+            # aggregation combinations that libcudf cannot represent.
+            pass
+
     key_values = [key.obj.cpu().tolist() for key in key_columns]
     key_validities = [
         None if key.validity is None else key.validity.cpu().tolist() # TODO: CPU?!!?!?!

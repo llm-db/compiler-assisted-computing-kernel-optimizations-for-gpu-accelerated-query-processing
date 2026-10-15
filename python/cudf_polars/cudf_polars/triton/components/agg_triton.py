@@ -32,6 +32,57 @@ class TritonAgg(TritonExpr):
         self.children = children
         self.is_pointwise = False
 
+    @property
+    def agg_request(self) -> plc.aggregation.Aggregation:
+        """Return the equivalent libcudf aggregation request."""
+        if self.name == "count":
+            return plc.aggregation.count(
+                null_handling=(
+                    plc.types.NullPolicy.INCLUDE
+                    if self.options
+                    else plc.types.NullPolicy.EXCLUDE
+                )
+            )
+        if self.name == "first":
+            return plc.aggregation.nth_element(
+                0, null_handling=plc.types.NullPolicy.INCLUDE
+            )
+        if self.name == "last":
+            return plc.aggregation.nth_element(
+                -1, null_handling=plc.types.NullPolicy.INCLUDE
+            )
+        if self.name == "sum":
+            return plc.aggregation.sum()
+        if self.name == "min":
+            return plc.aggregation.min()
+        if self.name == "max":
+            return plc.aggregation.max()
+        if self.name == "mean":
+            return plc.aggregation.mean()
+        if self.name == "median":
+            return plc.aggregation.median()
+        if self.name == "n_unique":
+            return plc.aggregation.nunique(
+                null_handling=(
+                    plc.types.NullPolicy.INCLUDE
+                    if self.options
+                    else plc.types.NullPolicy.EXCLUDE
+                )
+            )
+        if self.name == "std":
+            return plc.aggregation.std(ddof=self.options)
+        if self.name == "var":
+            return plc.aggregation.variance(ddof=self.options)
+        if self.name == "collect_list":
+            return plc.aggregation.collect_list()
+        if self.name == "quantile":
+            quantile = self.children[1].value
+            return plc.aggregation.quantile(
+                quantiles=[quantile],
+                interp=self.options,
+            )
+        raise NotImplementedError(f"Unsupported grouped aggregation {self.name!r}")
+
     def do_evaluate(
         self,
         df: TritonDataFrame,
