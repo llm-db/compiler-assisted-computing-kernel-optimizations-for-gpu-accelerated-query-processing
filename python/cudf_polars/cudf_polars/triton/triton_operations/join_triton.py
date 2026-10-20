@@ -1,6 +1,8 @@
 
 
 import torch
+import cupy as cp
+import pylibcudf as plc
 
 from cudf_polars.triton.components.column_triton import TritonColumn
 from cudf_polars.typing import Slice as Zlice
@@ -13,11 +15,20 @@ def join_gather_column(
 ) -> TritonColumn:
     """Gather a column, optionally marking selected rows null."""
     safe_indices = indices.clamp_min(0)
-    values = column.obj.index_select(0, safe_indices)
-    validity = column.validity.index_select(0, safe_indices).clone()
+    if isinstance(column.obj, plc.Column):
+        indices_col = plc.Column.from_array(cp.asarray(safe_indices))
+        (values,) = plc.copying.gather(
+            plc.Table([column.obj]),
+            indices_col,
+            plc.copying.OutOfBoundsPolicy.DONT_CHECK,
+        ).columns()
+    else:
+        values = column.obj.index_select(0, safe_indices)
+    validity_indices = safe_indices.to(column.validity.device)
+    validity = column.validity.index_select(0, validity_indices).clone()
     
     if nullify is not None:
-        validity = validity & nullify
+        validity = validity & nullify.to(validity.device)
     return TritonColumn(values, dtype=column.dtype, validity=validity, name=column.name)
 
 # def join_conditional_operand(

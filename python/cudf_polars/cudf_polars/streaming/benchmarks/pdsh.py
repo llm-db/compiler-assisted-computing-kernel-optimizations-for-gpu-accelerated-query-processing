@@ -73,8 +73,10 @@ if COUNT_DTYPE is not None:
 
     EXPECTED_CASTS_DECIMAL = {
         1: [
-            pl.col("sum_qty").cast(pl.Decimal(38, 2)),
-            pl.col("sum_base_price").cast(pl.Decimal(38, 2)),
+            # Q1 sums preserve the Decimal(15, 2) precision of the TPC-H
+            # lineitem inputs in the CPU reference result.
+            pl.col("sum_qty").cast(pl.Decimal(15, 2)),
+            pl.col("sum_base_price").cast(pl.Decimal(15, 2)),
             pl.col("sum_disc_price").cast(pl.Float64()),
             pl.col("sum_charge").cast(pl.Float64()),
             pl.col("avg_disc").cast(pl.Float64()),

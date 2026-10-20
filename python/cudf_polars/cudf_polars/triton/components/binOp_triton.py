@@ -153,6 +153,51 @@ class TritonBinOp(TritonExpr):
     def _apply_operation(
         self, df: TritonDataFrame, left: TritonColumn, right: TritonColumn, *, context: ExecutionContext = ExecutionContext.FRAME
     ) -> TritonColumn:
+        if isinstance(left.obj, plc.Column) or isinstance(right.obj, plc.Column):
+            from cudf_polars.containers import Column
+            from cudf_polars.triton.triton_conversion import (
+                column_cudf_to_triton,
+                dtype_triton_to_cudf,
+            )
+
+            def as_libcudf_operand(
+                column: TritonColumn,
+            ) -> plc.Column | plc.Scalar:
+                if isinstance(column.obj, plc.Column):
+                    return column.obj
+                value = column.obj_scalar(df.cudf_stream)
+                return plc.Scalar.from_py(
+                    value,
+                    dtype_triton_to_cudf(column.dtype).plc_type,
+                    stream=df.cudf_stream,
+                )
+
+            output_dtype = dtype_triton_to_cudf(self.dtype)
+            libcudf_op = {
+                plc.binaryop.BinaryOperator.ADD: plc.binaryop.BinaryOperator.ADD,
+                plc.binaryop.BinaryOperator.SUB: plc.binaryop.BinaryOperator.SUB,
+                plc.binaryop.BinaryOperator.MUL: plc.binaryop.BinaryOperator.MUL,
+                plc.binaryop.BinaryOperator.DIV: plc.binaryop.BinaryOperator.DIV,
+                plc.binaryop.BinaryOperator.LESS: plc.binaryop.BinaryOperator.LESS,
+                plc.binaryop.BinaryOperator.GREATER: plc.binaryop.BinaryOperator.GREATER,
+                plc.binaryop.BinaryOperator.GREATER_EQUAL: plc.binaryop.BinaryOperator.GREATER_EQUAL,
+                plc.binaryop.BinaryOperator.LESS_EQUAL: plc.binaryop.BinaryOperator.LESS_EQUAL,
+                plc.binaryop.BinaryOperator.EQUAL: plc.binaryop.BinaryOperator.EQUAL,
+            }.get(self.op)
+            if libcudf_op is not None:
+                result = plc.binaryop.binary_operation(
+                    as_libcudf_operand(left),
+                    as_libcudf_operand(right),
+                    libcudf_op,
+                    output_dtype.plc_type,
+                    stream=df.cudf_stream,
+                )
+                return column_cudf_to_triton(
+                    Column(result, dtype=output_dtype),
+                    name=None,
+                    stream=df.cudf_stream,
+                )
+
         lop: torch.Tensor | plc.Scalar = left.obj
         rop: torch.Tensor | plc.Scalar = right.obj
         if left.size != right.size:

@@ -97,6 +97,57 @@ class TritonAgg(TritonExpr):
         values = child.obj
         valid = child.validity
 
+        if isinstance(values, plc.Column):
+            from cudf_polars.containers import Column
+            from cudf_polars.triton.triton_conversion import (
+                column_cudf_to_triton,
+                dtype_triton_to_cudf,
+            )
+
+            output_dtype = dtype_triton_to_cudf(self.dtype)
+            input_column = values
+            if self.name == "mean" and input_column.type().id() != output_dtype.plc_type.id():
+                input_column = plc.unary.cast(
+                    input_column,
+                    output_dtype.plc_type,
+                    stream=df.cudf_stream,
+                )
+            if self.name in {"sum", "mean", "min", "max"}:
+                scalar = plc.reduce.reduce(
+                    input_column,
+                    self.agg_request,
+                    output_dtype.plc_type,
+                    stream=df.cudf_stream,
+                )
+                result = plc.Column.from_scalar(
+                    scalar,
+                    1,
+                    stream=df.cudf_stream,
+                )
+                return column_cudf_to_triton(
+                    Column(result, dtype=output_dtype),
+                    name=None,
+                    stream=df.cudf_stream,
+                )
+            if self.name == "count":
+                result = plc.Column.from_scalar(
+                    plc.Scalar.from_py(
+                        values.size() if self.options else values.size() - values.null_count(),
+                        output_dtype.plc_type,
+                        stream=df.cudf_stream,
+                    ),
+                    1,
+                    stream=df.cudf_stream,
+                )
+                return column_cudf_to_triton(
+                    Column(result, dtype=output_dtype),
+                    name=None,
+                    stream=df.cudf_stream,
+                )
+            raise NotImplementedError(
+                f"Unsupported opaque Triton aggregation {self.name!r}"
+            )
+
         if valid is not None:
             valid_values = values[valid]
         else:

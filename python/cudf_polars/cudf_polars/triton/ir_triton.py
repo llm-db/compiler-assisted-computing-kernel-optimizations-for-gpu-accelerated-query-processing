@@ -24,6 +24,7 @@ from cudf_polars.triton.triton_operations.join_triton import join_coalesce, join
 from cudf_polars.triton.components.binOp_triton import TritonBinOp
 from cudf_polars.triton.components.agg_triton import TritonAgg
 import pylibcudf as plc
+import cupy as cp
 
 from cudf_polars.triton.triton_operations.sort_triton import apply_sort, sort_indices
 from cudf_polars.triton.triton_operations.distinct_triton import distinct_triton_indices
@@ -144,8 +145,6 @@ def hstack_triton(
 ) -> TritonDataFrame:
     """Evaluate and return a dataframe."""
     columns = [c.evaluate(df) for c in exprs]
-    for c in columns:
-        print(c.obj, c.validity, should_broadcast)
     if should_broadcast:
         columns = broadcast_triton(
             *columns,
@@ -462,7 +461,7 @@ def _triton_column_to_plc(column: TritonColumn, stream) -> plc.Column:
         result = plc.Column.from_array(column.obj, stream=stream)
     if column.validity is None:
         return result
-    validity = plc.Column.from_array(column.validity, stream=stream)
+    validity = plc.Column.from_array(cp.asarray(column.validity), stream=stream)
     mask, null_count = plc.transform.bools_to_mask(validity, stream=stream)
     return result.with_mask(mask, null_count)
 
@@ -560,7 +559,12 @@ def groupby_triton(
             # aggregation combinations that libcudf cannot represent.
             pass
 
-    key_values = [key.obj.cpu().tolist() for key in key_columns]
+    key_values = [
+        key.obj.cpu().tolist()
+        if isinstance(key.obj, torch.Tensor)
+        else key.obj.to_arrow(stream=df.cudf_stream).to_pylist()
+        for key in key_columns
+    ]
     key_validities = [
         None if key.validity is None else key.validity.cpu().tolist() # TODO: CPU?!!?!?!
         for key in key_columns
@@ -620,7 +624,7 @@ def groupby_triton(
                         else bool(key_column.validity[rows[0]].item())
                         for rows in groups.values()
                     ],
-                    device=key_column.obj.device,
+                    device=df.stream.device,
                     dtype=torch.bool,
                 )
                 if key_column.validity is not None

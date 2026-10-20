@@ -7,6 +7,7 @@ from typing import List
 
 from numpy import isin
 import torch
+import cupy as cp
 
 from cudf_polars.dsl.expressions.base import Col, ColRef, Expr, NamedExpr
 from cudf_polars.dsl.expressions.literal import Literal, LiteralColumn
@@ -100,6 +101,20 @@ def _expr_cudf_to_triton(expr: Expr, con: ConversionManager, stream) -> TritonEx
             *children     
         )
     if isinstance(expr, BooleanFunction):
+        if expr.name is BooleanFunction.Name.IsIn:
+            return TritonUnaryFunction(
+                ty,
+                "is_in",
+                expr.options,
+                *(expr_cudf_to_triton(e, con, stream) for e in expr.children),
+            )
+        if expr.name is BooleanFunction.Name.Not:
+            return TritonUnaryFunction(
+                ty,
+                "not",
+                expr.options,
+                expr_cudf_to_triton(expr.children[0], con, stream),
+            )
         if expr.name not in (
             BooleanFunction.Name.IsNull,
             BooleanFunction.Name.IsNotNull,
@@ -167,7 +182,7 @@ def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
             plc_col = plc.Column.from_array(col.obj, stream=stream)
 
         if col.validity is not None and not isinstance(col.obj, plc.Column):
-            validity_col = plc.Column.from_array(col.validity, stream=stream)
+            validity_col = plc.Column.from_array(cp.asarray(col.validity), stream=stream)
             validity_mask, null_count = transform.bools_to_mask(
                 validity_col, stream=stream
             )

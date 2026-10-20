@@ -3,6 +3,7 @@
 from typing import Sequence
 import pylibcudf as plc
 import torch
+import cupy as cp
 
 from cudf_polars.triton.components.column_triton import TritonColumn
 
@@ -56,7 +57,7 @@ def apply_sort(
 ) -> TritonColumn:
     with torch.cuda.stream(stream):
         if isinstance(column.obj, plc.Column):
-            indices_col = plc.Column.from_array(indices, stream=stream)
+            indices_col = plc.Column.from_array(cp.asarray(indices), stream=stream)
             (sorted_column,) = plc.copying.gather(
                 plc.Table([column.obj]),
                 indices_col,
@@ -64,7 +65,10 @@ def apply_sort(
                 stream=stream,
             ).columns()
         else:
-            sorted_column = column.obj[indices]
+            if column.obj.dtype == torch.uint32:
+                sorted_column = column.obj.to(torch.int64)[indices].to(torch.uint32)
+            else:
+                sorted_column = column.obj[indices]
         return TritonColumn(
             sorted_column,
             dtype=column.dtype,
@@ -118,7 +122,38 @@ def sort_indices(
         )
 
     n = keys[0].size
-    device = keys[0].obj.device
+    device = (
+        keys[0].obj.device
+        if isinstance(keys[0].obj, torch.Tensor)
+        else keys[0].validity.device
+    )
+
+    if any(not isinstance(key.obj, torch.Tensor) for key in keys):
+        rows = list(range(n))
+        values = [
+            key.obj.to_arrow().to_pylist()
+            if isinstance(key.obj, plc.Column)
+            else key.obj.cpu().tolist()
+            for key in keys
+        ]
+        validities = [
+            key.validity.cpu().tolist() for key in keys
+        ]
+        for key_index in reversed(range(len(keys))):
+            key_values = values[key_index]
+            key_validity = validities[key_index]
+            descending = order[key_index] == plc.types.Order.DESCENDING
+            nulls_before = null_order[key_index] == plc.types.NullOrder.BEFORE
+
+            def sort_key(row: int) -> tuple[int, object]:
+                is_null = not key_validity[row]
+                return (
+                    (0 if nulls_before else 1) if is_null else (1 if nulls_before else 0),
+                    None if is_null else key_values[row],
+                )
+
+            rows.sort(key=sort_key, reverse=descending)
+        return torch.tensor(rows, device=device, dtype=torch.int64)
 
     for i, key in enumerate(keys):
         if key.size != n:
