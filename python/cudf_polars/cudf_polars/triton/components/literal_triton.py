@@ -36,6 +36,19 @@ class TritonLiteral(TritonExpr):
                 dtype=self.dtype,
                 validity=torch.zeros(1, device="cuda", dtype=torch.bool),
             )
+        if not isinstance(self.dtype, torch.dtype):
+            from cudf_polars.containers import DataType
+
+            dtype = DataType(polars_dtype=self.dtype)
+            scalar = plc.Scalar.from_py(
+                self.value,
+                dtype.plc_type,
+                stream=df.cudf_stream,
+            )
+            return TritonColumn(
+                plc.Column.from_scalar(scalar, 1, stream=df.cudf_stream),
+                dtype=self.dtype,
+            )
         return TritonColumn(
             torch.tensor([self.value], device="cuda", dtype=self.dtype),
             dtype=self.dtype,

@@ -164,6 +164,12 @@ class TritonBinOp(TritonExpr):
                 column: TritonColumn,
             ) -> plc.Column | plc.Scalar:
                 if isinstance(column.obj, plc.Column):
+                    if column.is_scalar:
+                        return plc.Scalar.from_py(
+                            column.obj_scalar(df.cudf_stream),
+                            dtype_triton_to_cudf(column.dtype).plc_type,
+                            stream=df.cudf_stream,
+                        )
                     return column.obj
                 value = column.obj_scalar(df.cudf_stream)
                 return plc.Scalar.from_py(

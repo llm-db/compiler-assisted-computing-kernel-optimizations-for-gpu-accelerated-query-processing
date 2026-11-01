@@ -1921,10 +1921,6 @@ class GroupBy(IR):
             )
             df2 = dataframe_cudf_to_triton(df)
             df3 = groupby_triton(df2, keys2, aggs2, maintain_order, zlice)
-            print("df2", df2)
-            print(keys2)
-            print(aggs2)
-            print("df3", df3)
             return dataframe_triton_to_cudf(df3)
 
         keys = broadcast(
@@ -2957,7 +2953,6 @@ class Sort(IR):
         """Evaluate and return a dataframe."""
 
         if is_triton_backend():
-            print(type(df))
             df2 = dataframe_cudf_to_triton(df)
             con = ConversionManager()
             by2 = [named_expr_cudf_to_triton(e, con, df.stream) for e in by]

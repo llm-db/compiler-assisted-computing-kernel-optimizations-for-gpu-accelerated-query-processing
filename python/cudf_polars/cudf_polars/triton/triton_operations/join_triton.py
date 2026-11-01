@@ -129,13 +129,60 @@ def _join_key_rows(
 
     values = []
     valid = []
-    value_dtype = keys[0].obj.dtype
-    for key in keys[1:]:
-        value_dtype = torch.promote_types(value_dtype, key.obj.dtype)
+    key_values = []
     for key in keys:
-        key_valid = key.validity.to(dtype=torch.bool)
-        key_values = key.obj.to(dtype=value_dtype)
-        values.append(torch.where(key_valid, key_values, torch.zeros_like(key_values)))
+        if isinstance(key.obj, torch.Tensor):
+            key_values.append(key.obj)
+            continue
+        if not isinstance(key.obj, plc.Column):
+            raise TypeError(f"Unsupported Triton join key: {type(key.obj)!r}")
+        if key.obj.type().id() not in {
+            plc.TypeId.INT8,
+            plc.TypeId.INT16,
+            plc.TypeId.INT32,
+            plc.TypeId.INT64,
+            plc.TypeId.UINT8,
+            plc.TypeId.UINT16,
+            plc.TypeId.UINT32,
+            plc.TypeId.UINT64,
+            plc.TypeId.FLOAT32,
+            plc.TypeId.FLOAT64,
+        }:
+            if plc.traits.is_fixed_point(key.obj.type()):
+                key_obj = plc.unary.cast(
+                    key.obj,
+                    plc.DataType(plc.TypeId.INT64),
+                )
+                key_values.append(
+                    torch.from_dlpack(
+                        plc.interop.to_dlpack(
+                            plc.Table([key_obj]),
+                            stream=None,
+                        )
+                    ).cuda()
+                )
+                continue
+            raise TypeError(
+                f"Unsupported non-numeric Triton join key {key.name!r}: "
+                f"{key.obj.type().id()}"
+            )
+        key_values.append(
+            torch.from_dlpack(
+                plc.interop.to_dlpack(plc.Table([key.obj]), stream=None)
+            ).cuda()
+        )
+    value_dtype = key_values[0].dtype
+    for key_value in key_values[1:]:
+        value_dtype = torch.promote_types(value_dtype, key_value.dtype)
+    for key, key_value in zip(keys, key_values, strict=True):
+        key_valid = key.validity.to(device=key_value.device, dtype=torch.bool)
+        values.append(
+            torch.where(
+                key_valid,
+                key_value.to(dtype=value_dtype),
+                torch.zeros_like(key_value, dtype=value_dtype),
+            )
+        )
         valid.append(key_valid.to(dtype=value_dtype))
 
     # Including validity in the key makes nulls equal to nulls only.  When

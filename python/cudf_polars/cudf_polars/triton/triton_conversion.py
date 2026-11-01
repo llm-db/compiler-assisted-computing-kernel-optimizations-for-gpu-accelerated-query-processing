@@ -142,7 +142,7 @@ def named_expr_cudf_to_triton(expr: NamedExpr, con: ConversionManager, stream):
     )
 
 def dataframes_cudf_to_triton(*dfs: DataFrame) -> List[TritonDataFrame]:
-    return [dataframe_triton_to_cudf(df) for df in dfs]
+    return [dataframe_cudf_to_triton(df) for df in dfs]
 
 def schema_cudf_to_triton(schema):
     d = dict()
@@ -152,9 +152,14 @@ def schema_cudf_to_triton(schema):
 
 
 def dataframe_cudf_to_triton(df: DataFrame) -> TritonDataFrame:
-    df.stream.synchronize()
     if not isinstance(df, DataFrame):
         raise ValueError(df)
+
+    cached = getattr(df, "_triton", None)
+    if cached is not None:
+        return cached
+
+    # df.stream.synchronize()
     triton_cols = [
         column_cudf_to_triton(
             col,
@@ -163,17 +168,23 @@ def dataframe_cudf_to_triton(df: DataFrame) -> TritonDataFrame:
         )
         for col in df.columns
     ]
-    return TritonDataFrame(
+    result = TritonDataFrame(
         triton_cols,
         cudf_stream=df.stream,
         num_rows=df._num_rows_override,
     )
+    result.cudfFallback = df
+    df._triton = result
+    return result
 
 
 def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
     """Convert to a cudf DataFrame."""
+    if df.cudfFallback is not None:
+        return df.cudfFallback
+
     stream = df.cudf_stream
-    stream.synchronize()
+    # stream.synchronize()
     gpu_cols = []
     for col in df.columns:
         if isinstance(col.obj, plc.Column):
@@ -196,7 +207,10 @@ def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
         )
         gpu_cols.append(gpu_col)
 
-    return DataFrame(gpu_cols, stream=stream, num_rows=df._num_rows_override)
+    result = DataFrame(gpu_cols, stream=stream, num_rows=df._num_rows_override)
+    result._triton = df
+    df.cudfFallback = result
+    return result
 
 def column_cudf_to_triton(
     col: Column,

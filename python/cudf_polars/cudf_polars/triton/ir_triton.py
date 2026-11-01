@@ -22,7 +22,7 @@ from cudf_polars.triton.components.base_triton import (
 from cudf_polars.typing import Schema, Slice as Zlice
 from cudf_polars.triton.triton_operations.join_triton import join_coalesce, join_gather, join_gather_column, join_pairs
 from cudf_polars.triton.components.binOp_triton import TritonBinOp
-from cudf_polars.triton.components.agg_triton import TritonAgg
+from cudf_polars.triton.components.agg_triton import TritonAgg, TritonLen
 import pylibcudf as plc
 import cupy as cp
 
@@ -482,6 +482,16 @@ def _plc_column_to_triton(
         validity = torch.from_dlpack(
             plc.interop.to_dlpack(plc.Table([validity_column]), stream=stream)
         ).to(torch.bool)
+    if isinstance(dtype, torch.dtype):
+        values = torch.from_dlpack(
+            plc.interop.to_dlpack(plc.Table([column]), stream=stream)
+        )
+        return TritonColumn(
+            values,
+            dtype=dtype,
+            validity=validity,
+            name=name,
+        )
     return TritonColumn(column, dtype=dtype, validity=validity, name=name)
 
 
@@ -500,7 +510,9 @@ def groupby_triton(
     # materialized every key on the CPU and then evaluated each group
     # separately, which made the cost proportional to the number of rows and
     # groups in Python.
-    if not maintain_order and all(isinstance(agg.value, TritonAgg) for agg in aggs):
+    if not maintain_order and all(
+        isinstance(agg.value, (TritonAgg, TritonLen)) for agg in aggs
+    ):
         try:
             grouper = plc.groupby.GroupBy(
                 plc.Table(
@@ -524,11 +536,18 @@ def groupby_triton(
             requests = []
             for agg in aggs:
                 value = agg.value
-                child = value.children[0].evaluate(df)
+                if isinstance(value, TritonLen):
+                    child = df.columns[0]
+                    aggregation = plc.aggregation.count(
+                        null_handling=plc.types.NullPolicy.INCLUDE
+                    )
+                else:
+                    child = value.children[0].evaluate(df)
+                    aggregation = value.agg_request
                 requests.append(
                     plc.groupby.GroupByRequest(
                         _triton_column_to_plc(child, df.cudf_stream),
-                        [value.agg_request],
+                        [aggregation],
                     )
                 )
             grouped_keys, grouped_values = grouper.aggregate(

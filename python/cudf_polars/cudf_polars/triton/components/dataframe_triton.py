@@ -7,6 +7,7 @@ from cudf_polars.triton.components.column_triton import TritonColumn, NamedColum
 import pylibcudf as plc
 import numpy as np
 import torch
+import cupy as cp
 from rmm.pylibrmm.stream import Stream
 from cudf_polars.utils import conversion
 from cudf_polars.typing import Slice
@@ -14,7 +15,7 @@ from cudf_polars.triton.components.boolOp_triton import boolean_operation
 from cudf_polars.triton.triton_operations.filter_triton_operation import masked_gather
 
 class TritonDataFrame:
-    cudfFallback: DataFrame
+    cudfFallback: DataFrame | None
 
     column_map: dict[str, TritonColumn]
     columns: list[NamedColumnTriton]
@@ -43,6 +44,7 @@ class TritonDataFrame:
         self.dtypes = [c.dtype for c in self.columns]
         self.column_map = {c.name: c for c in self.columns}
         self._num_rows_override = num_rows
+        self.cudfFallback = None
 
     # @classmethod
     # def from_cudf(cls, df: DataFrame): #, stream: Stream) -> Self:
@@ -105,14 +107,25 @@ class TritonDataFrame:
 
             new_columns = []
             for c in self.columns:
-                column_obj_tensor = masked_gather(c.obj, mask_indices, self.stream)
+                if isinstance(c.obj, plc.Column):
+                    indices = plc.Column.from_array(
+                        cp.asarray(mask_indices), stream=self.cudf_stream
+                    )
+                    (column_obj,) = plc.copying.gather(
+                        plc.Table([c.obj]),
+                        indices,
+                        plc.copying.OutOfBoundsPolicy.DONT_CHECK,
+                        stream=self.cudf_stream,
+                    ).columns()
+                else:
+                    column_obj = masked_gather(c.obj, mask_indices, self.stream)
                 column_validity_tensor = masked_gather(
                     c.validity, mask_indices, self.stream
                 )
 
                 new_columns.append(
                     TritonColumn(
-                        column=column_obj_tensor,
+                        column=column_obj,
                         validity=column_validity_tensor,
                         dtype=c.dtype,
                         name=c.name,
@@ -174,7 +187,15 @@ class TritonDataFrame:
         data_slice = slice(start, end if end is not None else None)
         sliced_columns = [
             TritonColumn(
-                column=col.obj[data_slice],
+                column=(
+                    plc.copying.slice(
+                        plc.Table([col.obj]),
+                        [start, (end if end is not None else col.size)],
+                        stream=self.cudf_stream,
+                    )[0].columns()[0]
+                    if isinstance(col.obj, plc.Column)
+                    else col.obj[data_slice]
+                ),
                 validity=None if col.validity is None else col.validity[data_slice],
                 dtype=col.dtype,
                 is_sorted=col.is_sorted,

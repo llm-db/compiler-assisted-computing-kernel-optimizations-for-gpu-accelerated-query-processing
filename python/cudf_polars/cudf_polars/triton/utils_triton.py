@@ -100,9 +100,6 @@ def concatonate_dataframes(*dfs: TritonDataFrame, context):
         raise ValueError("At least one dataframe is required")
 
     first = dfs[0]
-    for d in dfs:
-        print(d)
-
     # All frames must have the same schema/order.
     expected_names = first.column_names
     expected_dtypes = first.dtypes
@@ -117,18 +114,24 @@ def concatonate_dataframes(*dfs: TritonDataFrame, context):
     if len(dfs) == 1:
         return dfs[0]
 
-    streams = [df.stream for df in dfs]
-    print(streams)
     with stream_ordered_after(*(df.stream for df in dfs)):
         columns = []
 
         for i, name in enumerate(expected_names):
             input_columns = [df.columns[i] for df in dfs]
 
-            obj = torch.cat(
-                [col.obj for col in input_columns],
-                dim=0,
-            )
+            if any(isinstance(col.obj, plc.Column) for col in input_columns):
+                if not all(isinstance(col.obj, plc.Column) for col in input_columns):
+                    raise TypeError("Cannot concatenate mixed Triton column types")
+                obj = plc.concatenate.concatenate(
+                    [col.obj for col in input_columns],
+                    stream=first.cudf_stream,
+                )
+            else:
+                obj = torch.cat(
+                    [col.obj for col in input_columns],
+                    dim=0,
+                )
 
             validity = torch.cat(
                 [col.validity for col in input_columns],
@@ -147,7 +150,6 @@ def concatonate_dataframes(*dfs: TritonDataFrame, context):
                 )
             )
 
-    print(type(first)(columns, first.cudf_stream))
     return type(first)(columns, first.cudf_stream)
 
 # TODO?: Use?

@@ -33,6 +33,9 @@ def _run(
     iterations: int,
     suffix: str,
     validation: str | None,
+    executor: str,
+    backend_executor: str | None,
+    warmup: bool,
 ) -> dict[str, Any]:
     """Run one backend in a fresh process and return its JSON result."""
     command = [
@@ -47,12 +50,14 @@ def _run(
         "--frontend",
         frontend,
         "--iterations",
-        str(iterations),
+        str(iterations + int(warmup)),
         "--output",
         str(output_path),
         "--no-summarize",
         "--no-print-results",
         "--no-print-plans",
+        "--executor",
+        backend_executor or executor,
     ]
     if validation is not None:
         command.extend(["--validate-against", validation])
@@ -85,13 +90,15 @@ def _run(
     return records[0]
 
 
-def _timings(record: dict[str, Any]) -> dict[str, list[float]]:
+def _timings(
+    record: dict[str, Any], *, skip_warmup: bool = False
+) -> dict[str, list[float]]:
     """Return successful timings grouped by query."""
     timings: dict[str, list[float]] = {}
     for query, records in record["records"].items():
         values = [
             float(item["duration"])
-            for item in records
+            for item in records[int(skip_warmup) :]
             if item.get("status") == "success"
         ]
         if values:
@@ -127,6 +134,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("tpch_backend_results"),
         help="Directory for per-backend JSONL and summary JSON.",
     )
+    parser.add_argument(
+        "--executor",
+        choices=["in-memory", "streaming"],
+        default="in-memory",
+        help="GPU executor for the cuDF backend (default: in-memory).",
+    )
+    parser.add_argument(
+        "--triton-executor",
+        choices=["in-memory", "streaming"],
+        default=None,
+        help="Override the executor for the Triton backend.",
+    )
+    parser.add_argument(
+        "--warmup",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run one untimed-equivalent warm-up iteration per backend.",
+    )
     return parser
 
 
@@ -157,8 +182,11 @@ def main() -> None:
         iterations=args.iterations,
         suffix=args.suffix,
         validation=None,
+        executor="in-memory",
+        backend_executor=None,
+        warmup=args.warmup,
     )
-    cpu_timings = _timings(results["cpu"])
+    cpu_timings = _timings(results["cpu"], skip_warmup=args.warmup)
 
     for backend in backends:
         results[backend] = _run(
@@ -170,11 +198,16 @@ def main() -> None:
             iterations=args.iterations,
             suffix=args.suffix,
             validation="polars-cpu",
+            executor=args.executor,
+            backend_executor=(
+                args.triton_executor if backend == "triton" else None
+            ),
+            warmup=args.warmup,
         )
 
     summary: dict[str, Any] = {"timings_seconds": {}, "speedup_vs_cpu": {}}
     for backend, record in results.items():
-        timings = _timings(record)
+        timings = _timings(record, skip_warmup=args.warmup)
         summary["timings_seconds"][backend] = {
             query: {"samples": values, "mean": sum(values) / len(values)}
             for query, values in timings.items()

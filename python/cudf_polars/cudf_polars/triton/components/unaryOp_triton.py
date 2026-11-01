@@ -73,6 +73,7 @@ class  TritonUnaryFunction(TritonExpr):
                         column_cudf_to_triton,
                         dtype_triton_to_cudf,
                     )
+                    from cudf_polars.containers import DataType
 
                     result = plc.search.contains(
                         allowed.obj,
@@ -231,7 +232,7 @@ class TritonCast(TritonExpr):
             )
 
             if not isinstance(self.dtype, torch.dtype):
-                target_dtype = self.dtype
+                target_dtype = DataType(polars_dtype=self.dtype)
             else:
                 target_dtype = dtype_triton_to_cudf(self.dtype)
             if not isinstance(target_dtype, DataType):
@@ -266,6 +267,25 @@ class TritonCast(TritonExpr):
                 )
             casted = plc.unary.cast(
                 column.obj,
+                target_dtype.plc_type,
+                stream=df.cudf_stream,
+            )
+            return column_cudf_to_triton(
+                Column(casted, dtype=target_dtype),
+                name=column.name,
+                stream=df.cudf_stream,
+            )
+        if not isinstance(self.dtype, torch.dtype):
+            from cudf_polars.containers import DataType
+            from cudf_polars.containers.column import Column
+            from cudf_polars.triton.triton_conversion import (
+                column_cudf_to_triton,
+            )
+
+            target_dtype = DataType(polars_dtype=self.dtype)
+            source = plc.Column.from_array(column.obj, stream=df.cudf_stream)
+            casted = plc.unary.cast(
+                source,
                 target_dtype.plc_type,
                 stream=df.cudf_stream,
             )

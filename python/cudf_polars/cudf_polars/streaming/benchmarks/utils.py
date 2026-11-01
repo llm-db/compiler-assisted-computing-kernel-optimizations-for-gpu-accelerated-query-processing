@@ -416,6 +416,7 @@ class RunConfig:
 
     # Run parameters
     iterations: int
+    executor: Literal["in-memory", "streaming"] = "in-memory"
     io_mode: Literal["cold", "lukewarm", "hot"] = "lukewarm"
     collect_traces: bool = False
     native_parquet: bool = True
@@ -549,6 +550,7 @@ class RunConfig:
             suffix=args.suffix,
             qualification=args.qualification,
             frontend=args.frontend,
+            executor=args.executor,
             iterations=args.iterations,
             io_mode=args.io_mode,
             collect_traces=args.collect_traces,
@@ -576,6 +578,7 @@ class RunConfig:
             "suffix": self.suffix,
             "qualification": self.qualification,
             "frontend": self.frontend,
+            "executor": self.executor,
             "iterations": self.iterations,
             "io_mode": self.io_mode,
             "collect_traces": self.collect_traces,
@@ -748,7 +751,7 @@ def execute_query(
     ):
         if run_config.frontend == "polars-cpu":
             t0 = time.monotonic()
-            result = q.collect(engine="streaming")
+            result = q.collect()
             t1 = time.monotonic()
 
         elif CUDF_POLARS_AVAILABLE:
@@ -947,7 +950,7 @@ def run_polars_query(
     if validation_method is not None:
         match validation_method.expected_source:
             case "polars-cpu":
-                expected = q.collect()
+                expected = q.collect().with_columns(*casts)
             case "duckdb":
                 duckdb_queries_cls = benchmark().duckdb_queries
                 get_ddb = getattr(duckdb_queries_cls, f"q{q_id}")
@@ -1156,7 +1159,7 @@ def run_polars_in_memory(
         "parquet_options": parquet_options,
     }
     engine = pl.GPUEngine(
-        executor="in-memory",
+        executor=run_config.executor,
         raise_on_fail=True,
         **engine_options,
     )
@@ -1795,6 +1798,12 @@ def build_parser(num_queries: int = 22) -> argparse.ArgumentParser:
                 - polars-cpu : Polars CPU streaming engine (no GPU)
                 - ray        : Ray actor-based multi-GPU execution
                 - spmd       : SPMD execution via rrun launcher"""),
+    )
+    parser.add_argument(
+        "--executor",
+        choices=["in-memory", "streaming"],
+        default="in-memory",
+        help="GPU executor used by the single-process in-memory frontend.",
     )
     parser.add_argument(
         "--connect",

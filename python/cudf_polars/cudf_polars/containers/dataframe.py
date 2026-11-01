@@ -88,6 +88,7 @@ class NamedColumn(Column):
 
 class DataFrame:
     """A representation of a dataframe."""
+    _triton: Any
     column_map: dict[str, Column]
     table: plc.Table
     columns: list[NamedColumn]
@@ -106,6 +107,7 @@ class DataFrame:
         self.table = plc.Table([c.obj for c in self.columns])
         self.stream = stream
         self._num_rows_override = num_rows
+        self._triton = None
 
     def copy(self) -> Self:
         """Return a shallow copy of self."""
