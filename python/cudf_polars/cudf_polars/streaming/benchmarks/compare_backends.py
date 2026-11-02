@@ -23,6 +23,17 @@ def _parse_queries(value: str) -> str:
     return value
 
 
+def _query_numbers(value: str) -> list[int]:
+    """Expand a validated query selector into individual query numbers."""
+    if value == "all":
+        return list(range(1, 23))
+    result = []
+    for item in value.split(","):
+        bounds = [int(bound) for bound in item.split("-", 1)]
+        result.extend(range(bounds[0], bounds[-1] + 1))
+    return result
+
+
 def _run(
     *,
     backend: str | None,
@@ -36,6 +47,7 @@ def _run(
     executor: str,
     backend_executor: str | None,
     warmup: bool,
+    exclude_conversion_time: bool,
 ) -> dict[str, Any]:
     """Run one backend in a fresh process and return its JSON result."""
     command = [
@@ -61,6 +73,8 @@ def _run(
     ]
     if validation is not None:
         command.extend(["--validate-against", validation])
+    if exclude_conversion_time:
+        command.append("--exclude-conversion-time")
 
     output_path.unlink(missing_ok=True)
     environment = os.environ.copy()
@@ -76,6 +90,32 @@ def _run(
         text=True,
     )
     if completed.returncode != 0:
+        if backend in {"triton", "combined_triton"}:
+            print(
+                f"⚠️ {backend} failed for query {query}; "
+                "retrying with the cuDF backend.",
+                flush=True,
+            )
+            environment.pop("CUDF_POLARS__BACKEND", None)
+            fallback_command = command.copy()
+            fallback_command[
+                fallback_command.index("--frontend") + 1
+            ] = "in-memory"
+            output_path.unlink(missing_ok=True)
+            fallback = subprocess.run(
+                fallback_command,
+                check=False,
+                env=environment,
+                text=True,
+            )
+            if fallback.returncode == 0:
+                with output_path.open() as output:
+                    fallback_record = json.load(output)
+                fallback_record["requested_backend"] = backend
+                fallback_record["fallback_backend"] = {
+                    query: "cudf"
+                }
+                return fallback_record
         raise RuntimeError(
             f"{backend or 'cpu'} benchmark failed with exit code "
             f"{completed.returncode}; see the benchmark output above"
@@ -98,6 +138,22 @@ def _timings(
     for query, records in record["records"].items():
         values = [
             float(item["duration"])
+            for item in records[int(skip_warmup) :]
+            if item.get("status") == "success"
+        ]
+        if values:
+            timings[query] = values
+    return timings
+
+
+def _conversion_timings(
+    record: dict[str, Any], *, skip_warmup: bool = False
+) -> dict[str, list[float]]:
+    """Return measured dataframe conversion timings grouped by query."""
+    timings: dict[str, list[float]] = {}
+    for query, records in record["records"].items():
+        values = [
+            float(item.get("conversion_duration", 0.0))
             for item in records[int(skip_warmup) :]
             if item.get("status") == "success"
         ]
@@ -152,6 +208,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Run one untimed-equivalent warm-up iteration per backend.",
     )
+    parser.add_argument(
+        "--exclude-conversion-time",
+        action="store_true",
+        help=(
+            "Subtract host time spent converting Triton and cuDF dataframes "
+            "from timed GPU iterations."
+        ),
+    )
     return parser
 
 
@@ -164,7 +228,7 @@ def main() -> None:
     backends = [
         backend.strip() for backend in args.backends.split(",") if backend.strip()
     ]
-    invalid = set(backends) - {"cudf", "triton"}
+    invalid = set(backends) - {"cudf", "triton", "combined_triton"}
     if invalid:
         raise ValueError(f"Unsupported backends: {sorted(invalid)}")
     if not backends:
@@ -185,29 +249,85 @@ def main() -> None:
         executor="in-memory",
         backend_executor=None,
         warmup=args.warmup,
+        exclude_conversion_time=False,
     )
     cpu_timings = _timings(results["cpu"], skip_warmup=args.warmup)
 
     for backend in backends:
-        results[backend] = _run(
-            backend=backend,
-            frontend="in-memory",
-            query=args.query,
-            dataset_path=args.path,
-            output_path=args.output_dir / f"{backend}.jsonl",
-            iterations=args.iterations,
-            suffix=args.suffix,
-            validation="polars-cpu",
-            executor=args.executor,
-            backend_executor=(
-                args.triton_executor if backend == "triton" else None
-            ),
-            warmup=args.warmup,
-        )
+        output_path = args.output_dir / f"{backend}.jsonl"
+        queries = _query_numbers(args.query)
+        if backend not in {"triton", "combined_triton"} or len(queries) == 1:
+            results[backend] = _run(
+                backend=backend,
+                frontend="in-memory",
+                query=args.query,
+                dataset_path=args.path,
+                output_path=output_path,
+                iterations=args.iterations,
+                suffix=args.suffix,
+                validation="polars-cpu",
+                executor=args.executor,
+                backend_executor=(
+                    args.triton_executor if backend == "triton" else None
+                ),
+                warmup=args.warmup,
+                exclude_conversion_time=args.exclude_conversion_time,
+            )
+        else:
+            per_query = [
+                _run(
+                    backend=backend,
+                    frontend="in-memory",
+                    query=str(query),
+                    dataset_path=args.path,
+                    output_path=output_path,
+                    iterations=args.iterations,
+                    suffix=args.suffix,
+                    validation="polars-cpu",
+                    executor=args.executor,
+                    backend_executor=(
+                        args.triton_executor if backend == "triton" else None
+                    ),
+                    warmup=args.warmup,
+                    exclude_conversion_time=args.exclude_conversion_time,
+                )
+                for query in queries
+            ]
+            results[backend] = per_query[0]
+            results[backend]["queries"] = queries
+            results[backend]["records"] = {
+                query: records
+                for result in per_query
+                for query, records in result["records"].items()
+            }
+            fallback_queries = [
+                str(query)
+                for result in per_query
+                for query in result.get("fallback_backend", {})
+            ]
+            if fallback_queries:
+                results[backend]["fallback_backend"] = {
+                    query: "cudf" for query in fallback_queries
+                }
+            with output_path.open("w") as output:
+                json.dump(results[backend], output)
+                output.write("\n")
 
-    summary: dict[str, Any] = {"timings_seconds": {}, "speedup_vs_cpu": {}}
+    summary: dict[str, Any] = {
+        "conversion_time_excluded": args.exclude_conversion_time,
+        "conversion_seconds": {},
+        "timings_seconds": {},
+        "speedup_vs_cpu": {},
+    }
     for backend, record in results.items():
         timings = _timings(record, skip_warmup=args.warmup)
+        conversion_timings = _conversion_timings(
+            record, skip_warmup=args.warmup
+        )
+        summary["conversion_seconds"][backend] = {
+            query: {"samples": values, "mean": sum(values) / len(values)}
+            for query, values in conversion_timings.items()
+        }
         summary["timings_seconds"][backend] = {
             query: {"samples": values, "mean": sum(values) / len(values)}
             for query, values in timings.items()

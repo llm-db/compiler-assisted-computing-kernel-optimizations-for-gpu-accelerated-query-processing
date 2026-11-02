@@ -154,9 +154,7 @@ class TritonBinOp(TritonExpr):
         self, df: TritonDataFrame, left: TritonColumn, right: TritonColumn, *, context: ExecutionContext = ExecutionContext.FRAME
     ) -> TritonColumn:
         if isinstance(left.obj, plc.Column) or isinstance(right.obj, plc.Column):
-            from cudf_polars.containers import Column
             from cudf_polars.triton.triton_conversion import (
-                column_cudf_to_triton,
                 dtype_triton_to_cudf,
             )
 
@@ -198,11 +196,7 @@ class TritonBinOp(TritonExpr):
                     output_dtype.plc_type,
                     stream=df.cudf_stream,
                 )
-                return column_cudf_to_triton(
-                    Column(result, dtype=output_dtype),
-                    name=None,
-                    stream=df.cudf_stream,
-                )
+                return TritonColumn(result, dtype=self.dtype)
 
         lop: torch.Tensor | plc.Scalar = left.obj
         rop: torch.Tensor | plc.Scalar = right.obj
@@ -312,7 +306,13 @@ class TritonBinOp(TritonExpr):
         
         
 
-        return TritonColumn(ret_obj, validity=ret_validty, dtype=self.dtype)
+        result = TritonColumn(ret_obj, validity=ret_validty, dtype=self.dtype)
+        result.is_all_valid = (
+            left.is_all_valid
+            and right.is_all_valid
+            and self.op != plc.binaryop.BinaryOperator.DIV
+        )
+        return result
 
 
 @triton.jit

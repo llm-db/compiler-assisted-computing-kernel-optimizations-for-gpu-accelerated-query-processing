@@ -12,7 +12,6 @@ from rmm.pylibrmm.stream import Stream
 from cudf_polars.utils import conversion
 from cudf_polars.typing import Slice
 from cudf_polars.triton.components.boolOp_triton import boolean_operation
-from cudf_polars.triton.triton_operations.filter_triton_operation import masked_gather
 
 class TritonDataFrame:
     cudfFallback: DataFrame | None
@@ -103,68 +102,62 @@ class TritonDataFrame:
             mask_tensor = boolean_operation(
                 mask.obj, mask.validity, "and", stream=self.stream
             )
-            mask_indices = torch.nonzero(mask_tensor).flatten()
-
-            new_columns = []
+            mask_column = plc.Column.from_array(
+                cp.asarray(mask_tensor), stream=self.cudf_stream
+            )
+            input_columns = []
             for c in self.columns:
                 if isinstance(c.obj, plc.Column):
-                    indices = plc.Column.from_array(
-                        cp.asarray(mask_indices), stream=self.cudf_stream
-                    )
-                    (column_obj,) = plc.copying.gather(
-                        plc.Table([c.obj]),
-                        indices,
-                        plc.copying.OutOfBoundsPolicy.DONT_CHECK,
-                        stream=self.cudf_stream,
-                    ).columns()
+                    column_obj = c.obj
                 else:
-                    column_obj = masked_gather(c.obj, mask_indices, self.stream)
-                column_validity_tensor = masked_gather(
-                    c.validity, mask_indices, self.stream
-                )
-
-                new_columns.append(
-                    TritonColumn(
-                        column=column_obj,
-                        validity=column_validity_tensor,
-                        dtype=c.dtype,
-                        name=c.name,
+                    column_obj = plc.Column.from_array(
+                        cp.asarray(c.obj), stream=self.cudf_stream
                     )
-                )
+                if not c.is_all_valid:
+                    validity_column = plc.Column.from_array(
+                        cp.asarray(c.validity), stream=self.cudf_stream
+                    )
+                    validity_mask, null_count = plc.transform.bools_to_mask(
+                        validity_column, stream=self.cudf_stream
+                    )
+                    column_obj = column_obj.with_mask(validity_mask, null_count)
+                input_columns.append(column_obj)
 
-        return type(self)(new_columns, self.cudf_stream)
-        # table = apply_boolean_mask_triton(
-        #     [c.obj for c in self.columns],
-        #     mask.obj,
-        # )
+            filtered_table = plc.stream_compaction.apply_boolean_mask(
+                plc.Table(input_columns),
+                mask_column,
+                stream=self.cudf_stream,
+            )
+            new_columns = []
+            for c, column_obj in zip(
+                self.columns, filtered_table.columns(), strict=True
+            ):
+                if column_obj.null_mask() is None:
+                    new_columns.append(
+                        TritonColumn(column_obj, dtype=c.dtype, name=c.name)
+                    )
+                else:
+                    from cudf_polars.containers import Column
+                    from cudf_polars.triton.triton_conversion import (
+                        column_cudf_to_triton,
+                        dtype_triton_to_cudf,
+                    )
 
-        # validities = None
-        # if any(column.validity is not None for column in self.columns):
-        #     validities = apply_boolean_mask_triton(
-        #         [
-        #             column.validity
-        #             if column.validity is not None
-        #             else torch.ones_like(column.obj, dtype=torch.bool)
-        #             for column in self.columns
-        #         ],
-        #         mask.obj,
-        #     )
-
-        # columns = [
-        #     ColumnTriton(
-        #         column=column,
-        #         validity=validity,
-        #         dtype=original.dtype,
-        #         name=original.name,
-        #     )
-        #     for column, original, validity in zip(
-        #         table,
-        #         self.columns,
-        #         validities if validities is not None else [None] * len(self.columns),
-        #     )
-        # ]
-
-        # return type(self)(columns)
+                    new_columns.append(
+                        column_cudf_to_triton(
+                            Column(
+                                column_obj,
+                                dtype=(
+                                    c.dtype
+                                    if hasattr(c.dtype, "plc_type")
+                                    else dtype_triton_to_cudf(c.dtype)
+                                ),
+                            ),
+                            name=c.name,
+                            stream=self.cudf_stream,
+                        )
+                    )
+            return type(self)(new_columns, self.cudf_stream)
 
     def slice(self, zlice: Slice | None):
         """

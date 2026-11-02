@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     P = ParamSpec("P")
     T = TypeVar("T")
 
+
 __all__ = [
     "IR",
     "Cache",
@@ -1512,7 +1513,7 @@ class Select(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if(is_triton_backend()):
+        if(is_triton_backend("select")):
             con = ConversionManager()
             df2 = dataframe_cudf_to_triton(df)
             exprs2 = [named_expr_cudf_to_triton(e, con, df.stream) for e in exprs]
@@ -1612,7 +1613,7 @@ class Reduce(IR):
         context: IRExecutionContext,
     ) -> DataFrame:  # pragma: no cover; not exposed by polars yet
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("reducde"):
             con = ConversionManager()
             df2 = dataframe_cudf_to_triton(df)
             exprs2 = tuple(named_expr_cudf_to_triton(e, con, df.stream) for e in exprs)
@@ -1733,7 +1734,7 @@ class Rolling(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("rolling"):
             con = ConversionManager()
             df2 = dataframe_cudf_to_triton(df)
             index2 = named_expr_cudf_to_triton(index, con, df.stream)
@@ -1910,7 +1911,7 @@ class GroupBy(IR):
         """Evaluate and return a dataframe."""
         # Streaming groupby requires mergeable libcudf aggregation state across
         # partitions; TODO: Triton groupby currently evaluates complete groups only.
-        if is_triton_backend():
+        if is_triton_backend("group_by"):
             con = ConversionManager()
             keys2 = tuple(
                 named_expr_cudf_to_triton(key, con, df.stream) for key in keys_in
@@ -2251,7 +2252,7 @@ class ConditionalJoin(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("cond_join"):
             con = ConversionManager()
             left2 = dataframe_cudf_to_triton(left)
             right2 = dataframe_cudf_to_triton(right)
@@ -2555,7 +2556,7 @@ class Join(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("join"):
             con = ConversionManager()
             left2 = dataframe_cudf_to_triton(left)
             right2 = dataframe_cudf_to_triton(right)
@@ -2765,7 +2766,7 @@ class HStack(IR):
         *,
         context: IRExecutionContext,
     ) -> DataFrame:
-        if is_triton_backend():
+        if is_triton_backend("hstack"):
             con = ConversionManager()
             df2 = dataframe_cudf_to_triton(df)
             exprs = tuple(
@@ -2848,7 +2849,7 @@ class Distinct(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("distinct"):
             df2 = dataframe_cudf_to_triton(df)
             result = distinct_triton(df2, keep, subset, zlice)
             return dataframe_triton_to_cudf(result)
@@ -2952,7 +2953,7 @@ class Sort(IR):
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
 
-        if is_triton_backend():
+        if is_triton_backend("sort"):
             df2 = dataframe_cudf_to_triton(df)
             con = ConversionManager()
             by2 = [named_expr_cudf_to_triton(e, con, df.stream) for e in by]
@@ -3012,7 +3013,7 @@ class Slice(IR):
         cls, offset: int, length: int, df: DataFrame, *, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if(is_triton_backend()):
+        if(is_triton_backend("slice")):
             df2 = dataframe_cudf_to_triton(df)
             df3 = slice_triton(df2, offset, length)
             return dataframe_triton_to_cudf(df3)
@@ -3043,7 +3044,7 @@ class Filter(IR):
         cls, mask_expr: expr.NamedExpr, df: DataFrame, *, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if(is_triton_backend()):
+        if(is_triton_backend("filter")):
             con = ConversionManager()
             df2 = dataframe_cudf_to_triton(df)
             mask_expr2 = named_expr_cudf_to_triton(mask_expr, con, df.stream)
@@ -3076,7 +3077,7 @@ class Projection(IR):
         cls, schema: Schema, df: DataFrame, *, context: IRExecutionContext
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if(is_triton_backend()):
+        if(is_triton_backend("projection")):
             df2 = dataframe_cudf_to_triton(df)
             df3 = projection_triton(df2, schema)
             return dataframe_triton_to_cudf(df3)
@@ -3264,7 +3265,7 @@ class MapFunction(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if(is_triton_backend()):
+        if(is_triton_backend("mapfn")):
             df2 = dataframe_cudf_to_triton(df)
             df3 = map_function_triton(df2, schema, name, options)
             return dataframe_triton_to_cudf(df3)
@@ -3376,7 +3377,7 @@ class Union(IR):
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
         # raise NotImplementedError("EEE")
-        if(is_triton_backend()):
+        if(is_triton_backend("union")):
             dfs2 = [dataframe_cudf_to_triton(df) for df in dfs]
             df3 = union_triton(*dfs2, zlice=zlice, context=context)
             return dataframe_triton_to_cudf(df3)
@@ -3456,7 +3457,7 @@ class HConcat(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("hconcat"):
             schema2 = schema_cudf_to_triton(schema)
             dfs2 = tuple(dataframe_cudf_to_triton(df) for df in dfs)
             result = hconcat_triton(*dfs2, schema=schema2, should_broadcast=should_broadcast, strict=strict, context=context)
@@ -3527,7 +3528,7 @@ class Empty(IR):
         cls, schema: Schema, *, context: IRExecutionContext
     ) -> DataFrame:  # pragma: no cover
         """Evaluate and return a dataframe."""
-        if is_triton_backend():
+        if is_triton_backend("empty"):
             schema2 = schema_cudf_to_triton(schema)
             result = empty_triton(schema2, context=context)
             return dataframe_triton_to_cudf(result)

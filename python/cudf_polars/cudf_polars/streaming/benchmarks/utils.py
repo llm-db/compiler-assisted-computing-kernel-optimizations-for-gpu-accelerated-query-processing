@@ -69,7 +69,9 @@ try:
     )
     from cudf_polars.streaming.explain import explain_query
     from cudf_polars.streaming.parallel import evaluate_streaming
+    from cudf_polars.triton.triton_conversion import conversion_timer
     from cudf_polars.utils.config import ConfigOptions
+    import torch
 
     CUDF_POLARS_AVAILABLE = True
 except ImportError:
@@ -225,6 +227,7 @@ class SuccessRecord:
     query: int
     iteration: int
     duration: float
+    conversion_duration: float = 0.0
     statistics: dict[str, Any] | None = None
     traces: list[dict[str, Any]] | None = None
     validation_result: ValidationResult | None = None
@@ -739,7 +742,7 @@ def execute_query(
     run_config: RunConfig,
     args: argparse.Namespace,
     engine: None | pl.GPUEngine = None,
-) -> tuple[pl.DataFrame, float]:
+) -> tuple[pl.DataFrame, float, float]:
     """Execute a query with NVTX annotation."""
     if run_config.io_mode == "cold":
         drop_file_page_cache_recursively(run_config.dataset_path)
@@ -756,36 +759,44 @@ def execute_query(
 
         elif CUDF_POLARS_AVAILABLE:
             assert isinstance(engine, pl.GPUEngine)
-            if args.debug:
-                translator = Translator(q._ldf.visit(), engine)
-                ir = translator.translate_ir()
-                context = IRExecutionContext()
-                if run_config.frontend == "in-memory":
-                    t0 = time.monotonic()
-                    result = ir.evaluate(
-                        cache={}, timer=None, context=context
-                    ).to_polars()
-                    t1 = time.monotonic()
-                elif run_config.frontend in _STREAMING_FRONTENDS:
-                    t0 = time.monotonic()
-                    result = evaluate_streaming(
-                        ir,
-                        translator.config_options,
-                    )
-                    t1 = time.monotonic()
+            torch.cuda.synchronize()
+            with conversion_timer() as conversions:
+                if args.debug:
+                    translator = Translator(q._ldf.visit(), engine)
+                    ir = translator.translate_ir()
+                    context = IRExecutionContext()
+                    if run_config.frontend == "in-memory":
+                        t0 = time.monotonic()
+                        result = ir.evaluate(
+                            cache={}, timer=None, context=context
+                        ).to_polars()
+                        t1 = time.monotonic()
+                    elif run_config.frontend in _STREAMING_FRONTENDS:
+                        t0 = time.monotonic()
+                        result = evaluate_streaming(
+                            ir,
+                            translator.config_options,
+                        )
+                        t1 = time.monotonic()
+                    else:
+                        raise ValueError(
+                            f"--debug is not supported with --frontend {run_config.frontend}"
+                        )
                 else:
-                    raise ValueError(
-                        f"--debug is not supported with --frontend {run_config.frontend}"
-                    )
-            else:
-                t0 = time.monotonic()
-                result = q.collect(engine=engine)
+                    t0 = time.monotonic()
+                    result = q.collect(engine=engine)
+                    t1 = time.monotonic()
+                torch.cuda.synchronize()
                 t1 = time.monotonic()
+            duration = t1 - t0
+            if getattr(args, "exclude_conversion_time", False):
+                duration -= conversions.elapsed
+            return result, max(duration, 0.0), conversions.elapsed
 
         else:
             raise RuntimeError("The requested engine is not supported.")
 
-        return result, t1 - t0
+        return result, t1 - t0, 0.0
 
 
 def validate_result(
@@ -873,7 +884,9 @@ def run_polars_query_iteration(
     result_casts: list[pl.Expr] | None = None,
 ) -> SuccessRecord:
     """Run a single query iteration. Caller must wrap in try/except."""
-    result, duration = execute_query(q_id, iteration, q, run_config, args, engine)
+    result, duration, conversion_duration = execute_query(
+        q_id, iteration, q, run_config, args, engine
+    )
 
     if expected is not None and prepare_validation_result is not None:
         result = prepare_validation_result(result)
@@ -913,6 +926,7 @@ def run_polars_query_iteration(
         query=q_id,
         iteration=iteration,
         duration=duration,
+        conversion_duration=conversion_duration,
         statistics=statistics,
         validation_result=validation_result,
     )
@@ -1852,6 +1866,14 @@ def build_parser(num_queries: int = 22) -> argparse.ArgumentParser:
         default=False,
         action="store_true",
         help="Debug run.",
+    )
+    parser.add_argument(
+        "--exclude-conversion-time",
+        action="store_true",
+        help=(
+            "Subtract host time spent converting Triton and cuDF dataframes "
+            "from timed GPU iterations."
+        ),
     )
     parser.add_argument(
         "--max-io-threads",

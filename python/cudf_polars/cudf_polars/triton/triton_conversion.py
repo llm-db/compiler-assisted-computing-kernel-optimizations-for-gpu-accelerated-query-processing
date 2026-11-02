@@ -1,11 +1,9 @@
 
-import inspect
-from math import e
-import sys
-import traceback
+import contextlib
+import threading
+import time
 from typing import List
 
-from numpy import isin
 import torch
 import cupy as cp
 
@@ -32,6 +30,63 @@ from cudf_polars.triton.components.unaryOp_triton import TritonCast, TritonUnary
 from cudf_polars.triton.components.agg_triton import TritonAgg, TritonLen
 from cudf_polars.triton.components.ternary_triton import TritonTernary
 from cudf_polars.dsl.expressions.ternary import Ternary
+
+
+class ConversionTimer:
+    """Accumulate host time spent converting Triton and cuDF dataframes."""
+
+    def __init__(self) -> None:
+        self.elapsed = 0.0
+        self._active = 0
+        self._started: float | None = None
+
+    def start(self, timestamp: float) -> None:
+        if self._active == 0:
+            self._started = timestamp
+        self._active += 1
+
+    def stop(self, timestamp: float) -> None:
+        self._active -= 1
+        if self._active == 0:
+            assert self._started is not None
+            self.elapsed += timestamp - self._started
+            self._started = None
+
+
+_active_conversion_timer: ConversionTimer | None = None
+_conversion_timer_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def conversion_timer():
+    """Measure dataframe conversion time in the current execution context."""
+    global _active_conversion_timer
+    timer = ConversionTimer()
+    with _conversion_timer_lock:
+        previous = _active_conversion_timer
+        _active_conversion_timer = timer
+    try:
+        yield timer
+    finally:
+        with _conversion_timer_lock:
+            _active_conversion_timer = previous
+
+
+@contextlib.contextmanager
+def _record_conversion():
+    start = time.perf_counter()
+    with _conversion_timer_lock:
+        timer = _active_conversion_timer
+        if timer is not None:
+            timer.start(start)
+    try:
+        yield
+    finally:
+        end = time.perf_counter()
+        with _conversion_timer_lock:
+            if timer is not None:
+                timer.stop(end)
+
 
 class ConversionManager:
     def __init__(self):
@@ -152,65 +207,66 @@ def schema_cudf_to_triton(schema):
 
 
 def dataframe_cudf_to_triton(df: DataFrame) -> TritonDataFrame:
-    if not isinstance(df, DataFrame):
-        raise ValueError(df)
+    with _record_conversion():
+        if not isinstance(df, DataFrame):
+            raise ValueError(df)
 
-    cached = getattr(df, "_triton", None)
-    if cached is not None:
-        return cached
+        cached = getattr(df, "_triton", None)
+        if cached is not None:
+            return cached
 
-    # df.stream.synchronize()
-    triton_cols = [
-        column_cudf_to_triton(
-            col,
-            name=col.name,
-            stream=df.stream,
+        triton_cols = [
+            column_cudf_to_triton(
+                col,
+                name=col.name,
+                stream=df.stream,
+            )
+            for col in df.columns
+        ]
+        result = TritonDataFrame(
+            triton_cols,
+            cudf_stream=df.stream,
+            num_rows=df._num_rows_override,
         )
-        for col in df.columns
-    ]
-    result = TritonDataFrame(
-        triton_cols,
-        cudf_stream=df.stream,
-        num_rows=df._num_rows_override,
-    )
-    result.cudfFallback = df
-    df._triton = result
-    return result
+        result.cudfFallback = df
+        df._triton = result
+        return result
 
 
 def dataframe_triton_to_cudf(df: TritonDataFrame) -> DataFrame:
     """Convert to a cudf DataFrame."""
-    if df.cudfFallback is not None:
-        return df.cudfFallback
+    with _record_conversion():
+        if df.cudfFallback is not None:
+            return df.cudfFallback
 
-    stream = df.cudf_stream
-    # stream.synchronize()
-    gpu_cols = []
-    for col in df.columns:
-        if isinstance(col.obj, plc.Column):
-            plc_col = col.obj
-        else:
-            plc_col = plc.Column.from_array(col.obj, stream=stream)
+        stream = df.cudf_stream
+        gpu_cols = []
+        for col in df.columns:
+            if isinstance(col.obj, plc.Column):
+                plc_col = col.obj
+            else:
+                plc_col = plc.Column.from_array(col.obj, stream=stream)
 
-        if col.validity is not None and not isinstance(col.obj, plc.Column):
-            validity_col = plc.Column.from_array(cp.asarray(col.validity), stream=stream)
-            validity_mask, null_count = transform.bools_to_mask(
-                validity_col, stream=stream
+            if col.validity is not None and not isinstance(col.obj, plc.Column):
+                validity_col = plc.Column.from_array(
+                    cp.asarray(col.validity), stream=stream
+                )
+                validity_mask, null_count = transform.bools_to_mask(
+                    validity_col, stream=stream
+                )
+                plc_col = plc_col.with_mask(validity_mask, null_count)
+
+            gpu_col = Column(
+                column=plc_col,
+                name=col.name,
+                dtype=dtype_triton_to_cudf(col.dtype),
             )
-            plc_col = plc_col.with_mask(validity_mask, null_count)
+            gpu_cols.append(gpu_col)
 
-        # Reconstruct Column wrapping the plc.Column object
-        gpu_col = Column(
-            column=plc_col, 
-            name=col.name, 
-            dtype=dtype_triton_to_cudf(col.dtype)
-        )
-        gpu_cols.append(gpu_col)
-
-    result = DataFrame(gpu_cols, stream=stream, num_rows=df._num_rows_override)
-    result._triton = df
-    df.cudfFallback = result
-    return result
+        result = DataFrame(gpu_cols, stream=stream, num_rows=df._num_rows_override)
+        result._triton = df
+        df.cudfFallback = result
+        return result
 
 def column_cudf_to_triton(
     col: Column,

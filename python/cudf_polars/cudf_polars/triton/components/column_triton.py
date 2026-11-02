@@ -12,6 +12,7 @@ class TritonColumn:
     # example libcudf list columns) are carried through without interpretation.
     obj: Any
     validity: torch.Tensor
+    is_all_valid: bool
     is_sorted: plc.types.Sorted
     order: plc.types.Order
     null_order: plc.types.NullOrder
@@ -43,6 +44,7 @@ class TritonColumn:
             self.obj = column
 
         if validity is None:
+            self.is_all_valid = True
             if isinstance(self.obj, torch.Tensor):
                 self.validity = torch.ones_like(
                     self.obj, device=self.obj.device, dtype=torch.bool
@@ -52,8 +54,10 @@ class TritonColumn:
                     self.size, dtype=torch.bool
                 )
         elif isinstance(validity, torch.Tensor):
+            self.is_all_valid = False
             self.validity = validity
         else:
+            self.is_all_valid = False
             self.validity = torch.as_tensor(validity)
 
         self.is_scalar = self.size == 1

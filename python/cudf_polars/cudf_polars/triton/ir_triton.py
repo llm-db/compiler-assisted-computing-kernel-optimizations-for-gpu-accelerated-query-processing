@@ -10,7 +10,10 @@ import pyarrow as pa
 import polars as pl
 
 from cudf_polars.containers import DataType
-from cudf_polars.triton.triton_conversion import dtype_triton_to_cudf
+from cudf_polars.triton.triton_conversion import (
+    dtype_cudf_to_triton,
+    dtype_triton_to_cudf,
+)
 from cudf_polars.triton.components.dataframe_triton import TritonDataFrame
 from cudf_polars.triton.components.column_triton import TritonColumn
 from cudf_polars.triton.utils_triton import broadcast_triton, concatonate_dataframes, stream_ordered_after
@@ -319,8 +322,7 @@ def conditional_join_triton(
 def filter_triton(df: TritonDataFrame, mask: TritonExpr) -> TritonDataFrame:
     ev = mask.evaluate(df)
     (mask,) = broadcast_triton(ev, target_length=df.num_rows, stream=df.stream)
-    df2 = df.filter(mask)
-    return df2
+    return df.filter(mask)
 
 def union_triton(*dfs: TritonDataFrame, zlice: Zlice, context) -> TritonDataFrame:
     return concatonate_dataframes(*dfs, context=context).slice(zlice)
@@ -458,8 +460,8 @@ def _triton_column_to_plc(column: TritonColumn, stream) -> plc.Column:
     if isinstance(column.obj, plc.Column):
         result = column.obj
     else:
-        result = plc.Column.from_array(column.obj, stream=stream)
-    if column.validity is None:
+        result = plc.Column.from_array(cp.asarray(column.obj), stream=stream)
+    if column.is_all_valid:
         return result
     validity = plc.Column.from_array(cp.asarray(column.validity), stream=stream)
     mask, null_count = plc.transform.bools_to_mask(validity, stream=stream)
@@ -483,8 +485,9 @@ def _plc_column_to_triton(
             plc.interop.to_dlpack(plc.Table([validity_column]), stream=stream)
         ).to(torch.bool)
     if isinstance(dtype, torch.dtype):
+        values_column = column.with_mask(None, 0)
         values = torch.from_dlpack(
-            plc.interop.to_dlpack(plc.Table([column]), stream=stream)
+            plc.interop.to_dlpack(plc.Table([values_column]), stream=stream)
         )
         return TritonColumn(
             values,
@@ -502,8 +505,28 @@ def groupby_triton(
     maintain_order: bool,
     zlice: Zlice | None,
 ) -> TritonDataFrame:
+    evaluation_df = df
+    if (
+        df.cudfFallback is not None
+        and df.cudfFallback.num_rows == df.num_rows
+        and df.cudfFallback.column_names == df.column_names
+    ):
+        evaluation_df = TritonDataFrame(
+            [
+                TritonColumn(
+                    column.obj,
+                    dtype=dtype_cudf_to_triton(column.dtype),
+                    name=column.name,
+                )
+                for column in df.cudfFallback.columns
+            ],
+            df.cudf_stream,
+            num_rows=df._num_rows_override,
+        )
     key_columns = broadcast_triton(
-        *(key.evaluate(df) for key in keys), target_length=df.num_rows, stream=df.stream
+        *(key.evaluate(evaluation_df) for key in keys),
+        target_length=df.num_rows,
+        stream=df.stream,
     )
 
     # Keep the grouped operation on the device.  The previous implementation
@@ -514,13 +537,12 @@ def groupby_triton(
         isinstance(agg.value, (TritonAgg, TritonLen)) for agg in aggs
     ):
         try:
+            converted_keys = [
+                _triton_column_to_plc(column, df.cudf_stream)
+                for column in key_columns
+            ]
             grouper = plc.groupby.GroupBy(
-                plc.Table(
-                    [
-                        _triton_column_to_plc(column, df.cudf_stream)
-                        for column in key_columns
-                    ]
-                ),
+                plc.Table(converted_keys),
                 null_handling=plc.types.NullPolicy.INCLUDE,
                 keys_are_sorted=(
                     plc.types.Sorted.YES
@@ -537,12 +559,12 @@ def groupby_triton(
             for agg in aggs:
                 value = agg.value
                 if isinstance(value, TritonLen):
-                    child = df.columns[0]
+                    child = evaluation_df.columns[0]
                     aggregation = plc.aggregation.count(
                         null_handling=plc.types.NullPolicy.INCLUDE
                     )
                 else:
-                    child = value.children[0].evaluate(df)
+                    child = value.children[0].evaluate(evaluation_df)
                     aggregation = value.agg_request
                 requests.append(
                     plc.groupby.GroupByRequest(
