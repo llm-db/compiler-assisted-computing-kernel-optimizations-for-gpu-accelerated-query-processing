@@ -1,0 +1,11 @@
+operation	backend	rows	mean_ms	median_ms	min_ms
+str	str	i64	f64	f64	f64
+"distinct"	"cpu"	10000	0.5518958	0.535599	0.219356
+"distinct"	"cuda"	10000	0.321251	0.318544	0.271232
+"distinct"	"triton"	10000	0.76729	0.676896	0.617472
+"distinct"	"cpu"	100000	1.0986202	1.080903	1.033427
+"distinct"	"cuda"	100000	0.842512	0.749984	0.713728
+"distinct"	"triton"	100000	0.805712	0.794944	0.676544
+"distinct"	"cpu"	1000000	4.9930802	4.8271355	4.52035
+"distinct"	"cuda"	1000000	3.111354	3.074992	2.843392
+"distinct"	"triton"	1000000	1.795862	1.732224	1.687712
