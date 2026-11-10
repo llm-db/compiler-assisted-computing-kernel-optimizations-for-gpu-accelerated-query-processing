@@ -31,94 +31,6 @@ def join_gather_column(
         validity = validity & nullify.to(validity.device)
     return TritonColumn(values, dtype=column.dtype, validity=validity, name=column.name)
 
-# def join_conditional_operand(
-#     node: TritonExpr,
-#     left: TritonDataFrame,
-#     right: TritonDataFrame,
-# ) -> TritonColumn:
-#     """Evaluate one conditional-join expression over every row pair."""
-#     n_left, n_right = left.num_rows, right.num_rows
-#     device = left.stream.device
-#     if isinstance(node, TritonColRef):
-#         (column,) = node.children
-#         assert isinstance(column, TritonColumn)
-#         frame = (
-#             left
-#             if node.table_ref.name == "LEFT"
-#             else right
-#         )
-#         source = frame.column_map[column.name]
-#         values = (
-#             source.obj[:, None].expand(n_left, n_right)
-#             if frame is left
-#             else source.obj[None, :].expand(n_left, n_right)
-#         )
-#         valid = (
-#             torch.ones(values.shape, device=device, dtype=torch.bool)
-#             if source.validity is None
-#             else (
-#                 source.validity[:, None].expand(n_left, n_right)
-#                 if frame is left
-#                 else source.validity[None, :].expand(n_left, n_right)
-#             )
-#         )
-#         return values, valid
-#     if isinstance(node, TritonLiteral):
-#         return (
-#             torch.full((n_left, n_right), node.value, device=device, dtype=dtype_cudf_to_triton(node.dtype)),
-#             torch.ones((n_left, n_right), device=device, dtype=torch.bool),
-#         )
-#     if isinstance(node, cudf_expr.BinOp):
-#         left_value, left_valid = _conditional_operand(node.children[0], left, right)
-#         right_value, right_valid = _conditional_operand(node.children[1], left, right)
-#         op = node.op.name
-#         if op == "EQUAL":
-#             value = left_value == right_value
-#         elif op == "NOT_EQUAL":
-#             value = left_value != right_value
-#         elif op == "LESS":
-#             value = left_value < right_value
-#         elif op == "LESS_EQUAL":
-#             value = left_value <= right_value
-#         elif op == "GREATER":
-#             value = left_value > right_value
-#         elif op == "GREATER_EQUAL":
-#             value = left_value >= right_value
-#         elif op in {"ADD", "SUB", "MUL", "DIV", "TRUE_DIV", "FLOOR_DIV", "PYMOD"}:
-#             value = {
-#                 "ADD": left_value + right_value,
-#                 "SUB": left_value - right_value,
-#                 "MUL": left_value * right_value,
-#                 "DIV": left_value / right_value,
-#                 "TRUE_DIV": left_value / right_value,
-#                 "FLOOR_DIV": torch.floor_divide(left_value, right_value),
-#                 "PYMOD": torch.remainder(left_value, right_value),
-#             }[op]
-#         elif op in {"BITWISE_AND", "NULL_LOGICAL_AND", "LOGICAL_AND"}:
-#             value = left_value & right_value
-#         elif op in {"BITWISE_OR", "NULL_LOGICAL_OR", "LOGICAL_OR"}:
-#             value = left_value | right_value
-#         else:
-#             raise NotImplementedError(f"Conditional Triton operator {op}")
-#         return value, left_valid & right_valid
-#     if isinstance(node, cudf_expr.Cast):
-#         (child,) = node.children
-#         values, valid = _conditional_operand(child, left, right)
-#         return values.to(dtype_cudf_to_triton(node.dtype)), valid
-#     raise NotImplementedError(f"Conditional Triton expression {type(node).__name__}")
-
-# def replace_column_ref(expr: TritonExpr, left: TritonDataFrame, right: TritonDataFrame):
-#     def walk(node: TritonExpr):
-#         if isinstance(node, TritonColRef):
-#             if node.table_ref == plc.expressions.TableReference.LEFT:
-#                 node.df_override = left
-#             elif node.table_ref == plc.expressions.TableReference.RIGHT:
-#                 node.df_override = right
-#             else:
-#                 raise NotImplementedError(node.table_ref, " not implemented")
-#         for c in node.children:
-#             walk(c)
-#     walk(expr)
 
 def _join_key_rows(
     keys: list[TritonColumn], nulls_equal: bool
@@ -259,6 +171,88 @@ def _grouped_join_pairs(
     order = order[torch.argsort(left_pairs[order], stable=True)]
     return left_pairs[order], right_pairs[order]
 
+
+def _join_key_table(
+    keys: list[TritonColumn], *, stream
+) -> plc.Table:
+    """Convert Triton join keys to a libcudf table without host copies."""
+    columns = []
+    for key in keys:
+        if isinstance(key.obj, plc.Column):
+            column = key.obj
+        elif isinstance(key.obj, torch.Tensor):
+            column = plc.Column.from_array(cp.asarray(key.obj), stream=stream)
+        else:
+            raise TypeError(f"Unsupported Triton join key: {type(key.obj)!r}")
+
+        if not key.is_all_valid:
+            validity = plc.Column.from_array(
+                cp.asarray(key.validity), stream=stream
+            )
+            mask, null_count = plc.transform.bools_to_mask(
+                validity, stream=stream
+            )
+            column = column.with_mask(mask, null_count)
+        columns.append(column)
+    return plc.Table(columns)
+
+
+def _libcudf_join_pairs(
+    left_keys: list[TritonColumn],
+    right_keys: list[TritonColumn],
+    how: str,
+    nulls_equal: bool,
+    *,
+    device: torch.device,
+    stream,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use libcudf's hash join for joins whose maps are never nullable."""
+    null_equality = (
+        plc.types.NullEquality.EQUAL
+        if nulls_equal
+        else plc.types.NullEquality.UNEQUAL
+    )
+    left_table = _join_key_table(left_keys, stream=stream)
+    right_table = _join_key_table(right_keys, stream=stream)
+    if how == "Inner":
+        left_map, right_map = plc.join.inner_join(
+            left_table, right_table, null_equality, stream=stream
+        )
+    elif how == "Semi":
+        left_map = plc.join.left_semi_join(
+            left_table, right_table, null_equality, stream=stream
+        )
+        right_map = None
+    else:
+        left_map = plc.join.left_anti_join(
+            left_table, right_table, null_equality, stream=stream
+        )
+        right_map = None
+
+    def to_torch(column: plc.Column) -> torch.Tensor:
+        return torch.from_dlpack(
+            plc.interop.to_dlpack(plc.Table([column]), stream=None)
+        ).to(device=device, dtype=torch.long)
+
+    left_indices = to_torch(left_map)
+    right_indices = (
+        torch.empty(0, device=device, dtype=torch.long)
+        if right_map is None
+        else to_torch(right_map)
+    )
+    return left_indices, right_indices
+
+
+def _libcudf_join_compatible(
+    left_keys: list[TritonColumn], right_keys: list[TritonColumn]
+) -> bool:
+    return len(left_keys) == len(right_keys) and all(
+        left.obj.__class__ is right.obj.__class__
+        and left.dtype == right.dtype
+        for left, right in zip(left_keys, right_keys, strict=True)
+    )
+
+
 def join_pairs(
     left_keys: list[TritonColumn],
     right_keys: list[TritonColumn],
@@ -268,12 +262,25 @@ def join_pairs(
     device: torch.device,
     n_left: int,
     n_right: int,
+    stream=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build left/right row pairs for a join."""
     if how == "Cross":
         return (
             torch.arange(n_left, device=device).repeat_interleave(n_right),
             torch.arange(n_right, device=device).repeat(n_left),
+        )
+
+    if how in {"Inner", "Semi", "Anti"} and _libcudf_join_compatible(
+        left_keys, right_keys
+    ):
+        return _libcudf_join_pairs(
+            left_keys,
+            right_keys,
+            how,
+            nulls_equal,
+            device=device,
+            stream=stream,
         )
 
     matched_left, matched_right = _grouped_join_pairs(

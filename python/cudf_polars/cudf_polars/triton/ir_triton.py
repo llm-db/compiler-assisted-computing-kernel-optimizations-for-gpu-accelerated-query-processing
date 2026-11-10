@@ -55,6 +55,7 @@ def join_triton(
             device=left.stream.device,
             n_left=left.num_rows,
             n_right=right.num_rows,
+            stream=stream,
         )
 
         if how in {"Semi", "Anti"}:

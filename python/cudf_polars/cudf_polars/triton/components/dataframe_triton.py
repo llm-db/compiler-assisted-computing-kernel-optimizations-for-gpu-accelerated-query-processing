@@ -128,35 +128,30 @@ class TritonDataFrame:
                 mask_column,
                 stream=self.cudf_stream,
             )
+            from cudf_polars.containers import Column
+            from cudf_polars.triton.triton_conversion import (
+                column_cudf_to_triton,
+                dtype_triton_to_cudf,
+            )
+
             new_columns = []
             for c, column_obj in zip(
                 self.columns, filtered_table.columns(), strict=True
             ):
-                if column_obj.null_mask() is None:
-                    new_columns.append(
-                        TritonColumn(column_obj, dtype=c.dtype, name=c.name)
-                    )
-                else:
-                    from cudf_polars.containers import Column
-                    from cudf_polars.triton.triton_conversion import (
-                        column_cudf_to_triton,
-                        dtype_triton_to_cudf,
-                    )
-
-                    new_columns.append(
-                        column_cudf_to_triton(
-                            Column(
-                                column_obj,
-                                dtype=(
-                                    c.dtype
-                                    if hasattr(c.dtype, "plc_type")
-                                    else dtype_triton_to_cudf(c.dtype)
-                                ),
+                new_columns.append(
+                    column_cudf_to_triton(
+                        Column(
+                            column_obj,
+                            dtype=(
+                                c.dtype
+                                if hasattr(c.dtype, "plc_type")
+                                else dtype_triton_to_cudf(c.dtype)
                             ),
-                            name=c.name,
-                            stream=self.cudf_stream,
-                        )
+                        ),
+                        name=c.name,
+                        stream=self.cudf_stream,
                     )
+                )
             return type(self)(new_columns, self.cudf_stream)
 
     def slice(self, zlice: Slice | None):

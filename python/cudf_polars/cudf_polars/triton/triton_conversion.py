@@ -272,12 +272,16 @@ def column_cudf_to_triton(
     col: Column,
     *,
     name: str | None = None,
+    skip_torch: bool = False,
     stream,
 ) -> TritonColumn:
     if not isinstance(col, Column):
         raise ValueError(col)
     values_only = col.obj.with_mask(None, 0)
     dtype = dtype_cudf_to_triton(col.dtype)
+
+    if skip_torch:
+        return TritonColumn(col.obj, dtype, name=name)
 
     # DLPack only describes strided tensors. Nested and other non-primitive
     # libcudf columns are retained as opaque payloads so unrelated Triton

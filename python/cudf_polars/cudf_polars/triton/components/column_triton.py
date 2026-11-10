@@ -37,7 +37,7 @@ class TritonColumn:
         if isinstance(column, torch.Tensor):
             self.obj = column
         elif isinstance(column, Iterable) and not hasattr(column, "size"):
-            self.obj = torch.as_tensor(column)
+            self.obj = torch.as_tensor(column).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         else:
             # Keep non-tensor column representations (such as nested libcudf
             # columns) opaque until an operator explicitly supports them.
