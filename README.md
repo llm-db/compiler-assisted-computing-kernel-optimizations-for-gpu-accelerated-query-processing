@@ -1,1 +1,1 @@
-# compiler-assisted-computing-kernel-optimizations-for-gpu-accelerated-query-processing
+This repository contains the code for Andrin Gasser's master's thesis [Compiler-assisted Computing Kernel Optimizations for GPU-accelerated Query Processing]()
