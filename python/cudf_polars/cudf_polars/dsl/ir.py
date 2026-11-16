@@ -425,7 +425,6 @@ def _prepare_parquet_predicate(
     return predicate
 
 
-# Triton TODO
 class Scan(IR):
     """Input from files."""
 
@@ -2041,9 +2040,6 @@ class GroupBy(IR):
                 )
             ]
 
-        # df = DataFrame(broadcasted, stream=df.stream).slice(zlice)
-        # df2 = dataframe_cudf_to_triton(df)
-        # print(df2)
         return DataFrame(broadcasted, stream=df.stream).slice(zlice)
 
 
@@ -2257,7 +2253,6 @@ class ConditionalJoin(IR):
             left2 = dataframe_cudf_to_triton(left)
             right2 = dataframe_cudf_to_triton(right)
             pred = expr_cudf_to_triton(predicate_wrapper.predicate, con, stream=left2.stream)
-            pred.print_expr_tree()
             result = conditional_join_triton(
                 left2, right2, pred, options
             )
@@ -3461,7 +3456,7 @@ class HConcat(IR):
             schema2 = schema_cudf_to_triton(schema)
             dfs2 = tuple(dataframe_cudf_to_triton(df) for df in dfs)
             result = hconcat_triton(*dfs2, schema=schema2, should_broadcast=should_broadcast, strict=strict, context=context)
-            return dataframe_triton_to_cudf(result) # TODO? Old stream used
+            return dataframe_triton_to_cudf(result)
 
         with context.stream_ordered_after(*dfs) as stream:
             # Special should_broadcast case.

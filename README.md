@@ -1,140 +1,96 @@
-# <div align="left"><img src="img/rapids_logo.png" width="90px"/>&nbsp;cuDF - A GPU-accelerated DataFrame library for tabular data processing</div>
+# GPU-Accelerated SQL Query Execution with Triton
 
-cuDF (pronounced "KOO-dee-eff") is an [Apache 2.0 licensed](LICENSE), GPU-accelerated DataFrame library
-for tabular data processing. The cuDF library is one part of the [RAPIDS](https://rapids.ai/) GPU
-Accelerated Data Science suite of libraries.
+This repository contains the implementation and evaluation code for a
+thesis on executing SQL queries on GPUs with Triton.
 
-## About
+## Abstract
 
-cuDF is composed of multiple libraries including:
+SQL is widely used to manage and analyze structured data. As the volume of
+digital information continues to grow, efficient query execution becomes
+increasingly important. Graphics Processing Units (GPUs) have a highly
+parallel architecture and can therefore offer significant potential for
+accelerating data-intensive SQL operations.
 
-* [libcudf](https://docs.rapids.ai/api/cudf/stable/libcudf_docs/): A CUDA C++ library with [Apache Arrow](https://arrow.apache.org/) compliant
-data structures and fundamental algorithms for tabular data.
-* [pylibcudf](https://docs.rapids.ai/api/cudf/stable/pylibcudf/): A Python library providing [Cython](https://cython.org/) bindings for libcudf.
-* [cudf](https://docs.rapids.ai/api/cudf/stable/user_guide/): A Python library providing
-    - A DataFrame library mirroring the [pandas](https://pandas.pydata.org/) API
-    - A zero-code change accelerator, [cudf.pandas](https://docs.rapids.ai/api/cudf/stable/cudf_pandas/), for existing pandas code.
-* [cudf-polars](https://docs.rapids.ai/api/cudf/stable/cudf_polars/): A Python library providing a GPU engine for [Polars](https://pola.rs/)
-* [dask-cudf](https://docs.rapids.ai/api/dask-cudf/stable/): A Python library providing a GPU backend for [Dask](https://www.dask.org/) DataFrames
+This thesis investigates the performance of executing SQL queries on GPUs by
+implementing a framework that uses Triton as its backend. The framework builds
+upon the implementation of cuDF-Polars, but adopts a different backend for
+executing query operations.
 
-Notable projects that use cuDF include:
+The two implementations are evaluated and compared across different
+operators to identify their respective strengths and weaknesses. The results
+show that selected Triton operators improve performance in 15 of 22 TPC-H
+queries compared with their cuDF counterparts, while other operators perform
+more slowly.
 
-* [Spark RAPIDS](https://github.com/NVIDIA/spark-rapids): A GPU accelerator plugin for [Apache Spark](https://spark.apache.org/)
-* [Velox-cuDF](https://github.com/facebookincubator/velox/blob/main/velox/experimental/cudf/README.md): A [Velox](https://velox-lib.io/)
-extension module to execute Velox plans on the GPU
-* [Sirius](https://www.sirius-db.com/): A GPU-native SQL engine providing extensions for libraries like [DuckDB](https://duckdb.org/)
+Based on these findings, this thesis proposes a hybrid execution model that
+combines the most efficient operators from both implementations. This
+approach achieves significant performance improvements in 6 TPC-H queries and
+multiple minor improvements in others. The results highlight the potential of
+combining different GPU execution backends to improve overall SQL query
+performance.
+
+## Requirements
+
+The framework requires:
+
+* An NVIDIA GPU with a compatible NVIDIA driver
+* CUDA 12 or CUDA 13
+* Python 3.11 or newer
+* cuDF and cuDF-Polars from this repository
+* Polars 1.35 or newer
+* Triton
+* The dependencies listed in the cuDF-Polars package
+
+The CUDA version used by cuDF packages must match the installed CUDA
+environment. For current driver and CUDA compatibility information, see the
+[RAPIDS system requirements](https://docs.rapids.ai/install/#system-req).
 
 ## Installation
 
-### System Requirements
-
-Operating System, GPU driver, and supported CUDA version information can be found at the [RAPIDS Installation Guide](https://docs.rapids.ai/install/#system-req)
-
-### pip
-
-A stable release of each cudf library is available on PyPI. You will need to match the major version number of your installed CUDA version with a `-cu##` suffix when installing from PyPI.
-
-A development version of each library is available as a nightly release by including the `-i https://pypi.anaconda.org/rapidsai-wheels-nightly/simple` index.
+Install the Triton backend and the Python dependencies in a virtual
+environment:
 
 ```bash
-# CUDA 13
-pip install libcudf-cu13
-pip install pylibcudf-cu13
-pip install cudf-cu13
-pip install cudf-polars-cu13
-pip install dask-cudf-cu13
-
-# CUDA 12
-pip install libcudf-cu12
-pip install pylibcudf-cu12
-pip install cudf-cu12
-pip install cudf-polars-cu12
-pip install dask-cudf-cu12
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install triton
+python -m pip install -e python/cudf_polars
 ```
 
-### conda
+For a complete cuDF development environment, follow the
+[cuDF build and contribution guide](CONTRIBUTING.md#setting-up-your-build-environment).
 
-A stable release of each cudf library is available to be installed with the conda package manager by specifying the `-c rapidsai` channel.
+## Running the backend comparison
 
-A development version of each library is available as a nightly release by specifying the `-c rapidsai-nightly` channel instead.
+The TPC-H-derived benchmark definitions can be run across CPU Polars, cuDF
+Polars, and the custom Triton backend:
 
 ```bash
-conda install -c rapidsai libcudf
-conda install -c rapidsai pylibcudf
-conda install -c rapidsai cudf
-conda install -c rapidsai cudf-polars
-conda install -c rapidsai dask-cudf
+PYTHONPATH=python/cudf_polars python -m \
+  cudf_polars.streaming.benchmarks.compare_backends \
+  1,6,12 --path /path/to/pdsh/scale-1 --iterations 3
 ```
 
-### source
+The command writes one JSONL file per backend and a `summary.json` file to
+`tpch_backend_results/`. Use `--backends cudf` or `--backends triton` to run a
+single GPU backend. GPU results are validated against the CPU result before
+speedups are reported.
 
-To install cuDF from source, please follow [the contribution guide](CONTRIBUTING.md#setting-up-your-build-environment) detailing
-how to setup the build environment.
+PDS-H is a TPC-H-derived benchmark suite and should not be interpreted as an
+official TPC-H result. For more information about the benchmark notebook and
+dataset configuration, see [notebooks/README.md](notebooks/README.md).
 
-## Examples
+## Project structure
 
-The following examples showcase reading a parquet file, dropping missing rows with a null value,
-and performing a groupby aggregation on the data.
+* `python/cudf_polars/cudf_polars/triton/` contains the Triton data structures,
+  conversions, and query operators.
+* `python/cudf_polars/cudf_polars/dsl/` integrates backend selection into the
+  cuDF-Polars intermediate representation.
+* `notebooks/` contains notebooks and benchmark documentation used for the
+  evaluation.
 
-### cudf
+## License
 
-`import cudf` and the APIs are largely similar to pandas.
-
-```python
-import cudf
-
-df = cudf.read_parquet("data.parquet")
-df.dropna().groupby(["A", "B"]).mean()
-```
-
-### cudf.pandas
-
-With a Python file containing pandas code:
-
-```python
-import pandas as pd
-
-df = pd.read_parquet("data.parquet")
-df.dropna().groupby(["A", "B"]).mean()
-```
-
-Use cudf.pandas by invoking `python` with `-m cudf.pandas`
-
-```bash
-$ python -m cudf.pandas script.py
-```
-
-If running the pandas code in an interactive Jupyter environment, call `%load_ext cudf.pandas` before
-importing pandas.
-
-```python
-In [1]: %load_ext cudf.pandas
-
-In [2]: import pandas as pd
-
-In [3]: df = pd.read_parquet("data.parquet")
-
-In [4]: df.dropna().groupby(["A", "B"]).mean()
-```
-
-### cudf-polars
-
-Using Polars' [lazy API](https://docs.pola.rs/user-guide/lazy/), call `collect` with `engine="gpu"` to run
-the operation on the GPU
-
-```python
-import polars as pl
-
-lf = pl.scan_parquet("data.parquet")
-lf.drop_nulls().group_by(["A", "B"]).mean().collect(engine="gpu")
-```
-
-## Questions and Discussion
-
-For bug reports or feature requests, please [file an issue](https://github.com/rapidsai/cudf/issues/new/choose) on the GitHub issue tracker.
-
-For questions or discussion about cuDF and GPU data processing, feel free to post in the [RAPIDS Slack](https://rapids.ai/slack-invite) workspace.
-
-## Contributing
-
-cuDF is open to contributions from the community! Please see our [guide for contributing to cuDF](CONTRIBUTING.md) for more information.
+This project is based on [cuDF](https://github.com/rapidsai/cudf) and is
+licensed under the [Apache 2.0 License](LICENSE).

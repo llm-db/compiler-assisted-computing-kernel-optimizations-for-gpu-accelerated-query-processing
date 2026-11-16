@@ -152,7 +152,6 @@ def concatonate_dataframes(*dfs: TritonDataFrame, context):
 
     return type(first)(columns, first.cudf_stream)
 
-# TODO?: Use?
 @contextmanager
 def stream_ordered_after(
     *upstreams: torch.cuda.Stream,
@@ -169,81 +168,3 @@ def stream_ordered_after(
 
     with torch.cuda.stream(result_stream):
         yield result_stream
-
-# _BINOPS = {
-#     plc.binaryop.BinaryOperator.EQUAL,
-#     plc.binaryop.BinaryOperator.NOT_EQUAL,
-#     plc.binaryop.BinaryOperator.LESS,
-#     plc.binaryop.BinaryOperator.LESS_EQUAL,
-#     plc.binaryop.BinaryOperator.GREATER,
-#     plc.binaryop.BinaryOperator.GREATER_EQUAL,
-#     # TODO: Handle other binary operations as needed
-# }
-
-# def _add_cast(
-#     target: DataType,
-#     side: TritonColRef,
-#     left_casts: dict[str, DataType],
-#     right_casts: dict[str, DataType],
-# ) -> None:  # pragma: no cover
-#     (col,) = side.children
-#     assert isinstance(col, TritonColumn)
-#     casts = (
-#         left_casts if side.table_ref == plc.expressions.TableReference.LEFT else right_casts
-#     )
-#     casts[col.name] = target
-
-# def _align_decimal_binop_types(
-#     left_expr: TritonColRef,
-#     right_expr: TritonColRef,
-#     left_casts: dict[str, DataType],
-#     right_casts: dict[str, DataType],
-# ) -> None:
-#     left_type, right_type = left_expr.dtype, right_expr.dtype
-
-#     if plc.traits.is_fixed_point(left_type.plc_type) and plc.traits.is_fixed_point(
-#         right_type.plc_type
-#     ):
-#         target = DataType.common_decimal_dtype(left_type, right_type)
-
-#         if (
-#             left_type.id() != target.id() or left_type.scale() != target.scale()
-#         ):  # pragma: no cover
-#             _add_cast(target, left_expr, left_casts, right_casts)
-
-#         if right_type.id() != target.id() or right_type.scale() != target.scale():
-#             _add_cast(target, right_expr, left_casts, right_casts)
-
-#     elif (
-#         plc.traits.is_fixed_point(left_type.plc_type)
-#         and plc.traits.is_floating_point(right_type.plc_type)
-#     ) or (
-#         plc.traits.is_fixed_point(right_type.plc_type)
-#         and plc.traits.is_floating_point(left_type.plc_type)
-#     ):  # pragma: no cover
-#         is_decimal_left = plc.traits.is_fixed_point(left_type.plc_type)
-#         decimal_expr, float_expr = (
-#             (left_expr, right_expr) if is_decimal_left else (right_expr, left_expr)
-#         )
-#         _add_cast(decimal_expr.dtype, float_expr, left_casts, right_casts)
-
-# def collect_decimal_binop_casts(
-#     predicate: TritonExpr,
-# ) -> tuple[dict[str, DataType], dict[str, DataType]]:
-#     left_casts: dict[str, DataType] = {}
-#     right_casts: dict[str, DataType] = {}
-
-#     def _walk(node: TritonExpr) -> None:
-#         if isinstance(node, TritonBinOp) and node.op in _BINOPS:
-#             left_expr, right_expr = node.children
-#             if isinstance(left_expr, TritonColRef) and isinstance(
-#                 right_expr, TritonColRef
-#             ):
-#                 _align_decimal_binop_types(
-#                     left_expr, right_expr, left_casts, right_casts
-#                 )
-#         for child in node.children:
-#             _walk(child)
-
-#     _walk(predicate)
-#     return left_casts, right_casts

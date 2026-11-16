@@ -45,41 +45,6 @@ class TritonDataFrame:
         self._num_rows_override = num_rows
         self.cudfFallback = None
 
-    # @classmethod
-    # def from_cudf(cls, df: DataFrame): #, stream: Stream) -> Self:
-    #     """
-    #     Create from a cudf dataframe.
-
-    #     Parameters
-    #     ----------
-    #     df
-    #         Cudf dataframe to convert
-    #     Returns
-    #     -------
-    #     New dataframe representing the input.
-    #     """
-    #     arrow_columns = [
-    #         col.obj.to_arrow(stream=df.stream) for col in df.columns
-    #     ]
-        
-    #     # Reconstruct the PyArrow Table
-    #     import pyarrow as pa
-    #     arrow_table = pa.Table.from_arrays(
-    #         arrow_columns, 
-    #         names=[c.name for c in df.columns]
-    #     )
-
-    #     # Extract NumPy arrays for TritonDataFrame
-    #     triton_cols = [
-    #         # ColumnTriton(column=torch.tensor(col.to_numpy()), name=name, dtype=c.dtype)
-    #         ColumnTriton(column=col, name=name, dtype=c.dtype)
-    #         for col, name, c in zip(arrow_table.columns, df.column_map.keys(), df.columns)
-    #     ]
-        
-    #     return cls(triton_cols, num_rows=df._num_rows_override)
-    
-
-
     @property
     def num_rows(self) -> int:
         if self._num_rows_override is not None:

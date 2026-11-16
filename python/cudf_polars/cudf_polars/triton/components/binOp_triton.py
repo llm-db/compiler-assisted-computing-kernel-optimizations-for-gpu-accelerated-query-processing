@@ -206,7 +206,7 @@ class TritonBinOp(TritonExpr):
             elif right.is_scalar:
                 rop = right.obj_scalar(df.stream)
             else:
-                print("NO SCALAR DETECTED!")
+                raise ValueError("Binary operation operands have different sizes")
 
         if is_integer_not_bool(self.dtype) and self.op in {
             plc.binaryop.BinaryOperator.FLOOR_DIV,

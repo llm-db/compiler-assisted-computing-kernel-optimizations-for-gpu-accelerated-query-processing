@@ -282,18 +282,6 @@ def conditional_join_triton(
         right
     )
 
-    # n_left = left.num_rows
-    # n_right = right.num_rows
-    # matches = torch.ones((n_left, n_right), device=left.columns[0].obj.device, dtype=torch.bool)
-
-    # TODO: Not good, should be 2D all in triton
-    
-        # new_col = TritonColumn(
-        #     torch.tensor([col.obj[r]], device=col.obj.device), 
-        #     dtype=col.dtype, 
-        #     validity=torch.tensor([col.validity[r]], device=col.obj.device)
-        # )
-
     left_indices, right_indices = torch.nonzero(matches_col.obj, as_tuple=True)
 
     left_columns, right_columns = join_gather(left, right, options, left_indices, right_indices)
@@ -365,7 +353,7 @@ def rolling_triton(
         )
     key_values_host = [key.obj.cpu().tolist() for key in key_columns]
     key_validities_host = [
-        key.validity.cpu().tolist() # TODO: WHY CPU????
+        key.validity.cpu().tolist()
         for key in key_columns
     ]
     group_labels = [
@@ -608,7 +596,7 @@ def groupby_triton(
         for key in key_columns
     ]
     key_validities = [
-        None if key.validity is None else key.validity.cpu().tolist() # TODO: CPU?!!?!?!
+        None if key.validity is None else key.validity.cpu().tolist()
         for key in key_columns
     ]
     labels = [

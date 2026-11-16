@@ -99,17 +99,6 @@ class TritonExpr(Node["TritonExpr"]):
             are not perfect.
         """
         return self.do_evaluate(df, context=context)
-    def print_expr_tree(self) -> None:
-        def expr_tree(expr: TritonExpr, indent: int = 0) -> None:
-            print("  " * indent + str(expr))
-
-            for child in getattr(expr, "children", ()):
-                if isinstance(child, TritonExpr):
-                    expr_tree(child, indent + 1)
-                else:
-                    print("  " * (indent + 1) + repr(child))
-        expr_tree(self, 0)
-
     @property
     def agg_request(self) -> plc.aggregation.Aggregation:
         """
@@ -233,6 +222,5 @@ class TritonNamedExpr:
         name to a column produced from an expression.
         """
         return self.value.evaluate(df, context=context).rename(self.name)
-
 
 
