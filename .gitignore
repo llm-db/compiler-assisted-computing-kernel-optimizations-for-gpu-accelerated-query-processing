@@ -18,6 +18,7 @@ DartConfiguration.tcl
 .clangd
 compile_commands.json
 datasets/
+tpch_backend_results/
 
 ## Python build directories & artifacts
 dask-worker-space/

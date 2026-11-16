@@ -307,11 +307,30 @@ def column_cudf_to_triton(
             dtype=dtype,
         )
 
-    values_capsule = plc.interop.to_dlpack(
-        plc.Table([values_only]),
-        stream=stream,
-    )
-    tensor = torch.from_dlpack(values_capsule).cuda()
+    # The libcudf DLPack exporter currently copies column data into a dense
+    # RMM buffer. Use the CUDA array interface instead so Triton aliases the
+    # existing cuDF allocation. `data()` points at the allocation base, while
+    # the column offset identifies the first logical row.
+    physical_dtype = {
+        plc.TypeId.BOOL8: cp.bool_,
+        plc.TypeId.INT8: cp.int8,
+        plc.TypeId.INT16: cp.int16,
+        plc.TypeId.INT32: cp.int32,
+        plc.TypeId.INT64: cp.int64,
+        plc.TypeId.UINT8: cp.uint8,
+        plc.TypeId.UINT16: cp.uint16,
+        plc.TypeId.UINT32: cp.uint32,
+        plc.TypeId.UINT64: cp.uint64,
+        plc.TypeId.FLOAT32: cp.float32,
+        plc.TypeId.FLOAT64: cp.float64,
+    }[values_only.type().id()]
+    values = cp.asarray(values_only.data())
+    if values.dtype != physical_dtype:
+        values = values.view(physical_dtype).reshape(-1)
+    values = values[
+        values_only.offset() : values_only.offset() + values_only.size()
+    ]
+    tensor = torch.from_dlpack(values)
 
     if tensor.dtype != dtype:
         tensor = tensor.to(dtype)
@@ -340,6 +359,7 @@ def column_cudf_to_triton(
         validity=validity,
         name=name,
         dtype=dtype,
+        owner=values,
     )
 
 

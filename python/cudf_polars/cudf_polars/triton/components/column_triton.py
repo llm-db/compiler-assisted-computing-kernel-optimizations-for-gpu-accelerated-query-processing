@@ -22,6 +22,7 @@ class TritonColumn:
     # The internal evaluation should not care about the name.
     name: str | None
     dtype: DataType | torch.dtype
+    _owner: object | None
 
     def __init__(
         self,
@@ -33,6 +34,7 @@ class TritonColumn:
         order: plc.types.Order = plc.types.Order.ASCENDING,
         null_order: plc.types.NullOrder = plc.types.NullOrder.BEFORE,
         name: str | None = None,
+        owner: object | None = None,
     ):
         if isinstance(column, torch.Tensor):
             self.obj = column
@@ -63,6 +65,7 @@ class TritonColumn:
         self.is_scalar = self.size == 1
         self.name = name
         self.dtype = dtype
+        self._owner = owner
         self.set_sorted(is_sorted=is_sorted, order=order, null_order=null_order)
 
     @property
@@ -171,6 +174,7 @@ class TritonColumn:
             null_order=self.null_order,
             name=self.name,
             dtype=self.dtype,
+            owner=self._owner,
         )
 
 class NamedColumnTriton(TritonColumn):
