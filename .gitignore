@@ -19,6 +19,9 @@ DartConfiguration.tcl
 compile_commands.json
 datasets/
 tpch_backend_results/
+.agents/
+.benchmarks/
+.devcontainer/
 
 ## Python build directories & artifacts
 dask-worker-space/
