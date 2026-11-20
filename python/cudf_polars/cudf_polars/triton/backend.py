@@ -18,9 +18,9 @@ excluded_ops = [
     # "filter",
     "projection",
     # "slice",
-    "sort",
+    # "sort",
     # "hstack",
-    "distinct"
+    # "distinct"
 ]
 
 def is_triton_backend(op: str) -> bool:

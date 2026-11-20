@@ -5,29 +5,13 @@ thesis on executing SQL queries on GPUs with Triton.
 
 ## Abstract
 
-SQL is widely used to manage and analyze structured data. As the volume of
-digital information continues to grow, efficient query execution becomes
-increasingly important. Graphics Processing Units (GPUs) have a highly
-parallel architecture and can therefore offer significant potential for
-accelerating data-intensive SQL operations.
+When working with structured data, the SQL query language is a widely used tool to manage and analyze these data. With a constantly growing volume of digital information, efficient query execution becomes increasingly important. Graphics Processing Units (GPUs) possess a highly parallel architecture and can offer significant potential for accelerating data-intensive SQL operations.
 
-This thesis investigates the performance of executing SQL queries on GPUs by
-implementing a framework that uses Triton as its backend. The framework builds
-upon the implementation of cuDF-Polars, but adopts a different backend for
-executing query operations.
+This thesis investigates the performance of executing SQL queries on GPUs by implementing a framework that uses Triton as its backend. The framework builds upon the implementation of cuDF Polars, but adopts a different backend to execute query operations.
 
-The two implementations are evaluated and compared across different
-operators to identify their respective strengths and weaknesses. The results
-show that selected Triton operators improve performance in 15 of 22 TPC-H
-queries compared with their cuDF counterparts, while other operators perform
-more slowly.
+The performance of the two implementations is then evaluated and compared between different operators to find their respective strengths and weaknesses. The results show that certain Triton operators gain performance improvements in 14 out of 22 TPC-H queries compared to their cuDF counterparts, while other operators perform more slowly.
 
-Based on these findings, this thesis proposes a hybrid execution model that
-combines the most efficient operators from both implementations. This
-approach achieves significant performance improvements in 6 TPC-H queries and
-multiple minor improvements in others. The results highlight the potential of
-combining different GPU execution backends to improve overall SQL query
-performance.
+Based on these findings, this thesis proposes a hybrid execution model that combines the most efficient operators from both implementations. This approach achieves performance improvements in 16 TPC-H queries, but also decreases some of the speedup the Triton implementation has. The results highlight the potential of combining different GPU execution backends to improve overall SQL query performance.
 
 ## Requirements
 
